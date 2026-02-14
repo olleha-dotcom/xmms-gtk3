@@ -1,0 +1,38 @@
+#custom local stuff
+editor.sh
+# Build artifacts
+*.o
+*.lo
+*.la
+*.a
+*.so
+*.so.*
+.libs/
+.deps/
+
+# Autotools/cache/generated local files
+autom4te.cache/
+config.log
+config.status
+libtool
+stamp-h1
+compile
+depcomp
+install-sh
+missing
+ltmain.sh
+
+# Packaging/build output
+.pkgbuild/
+*.deb
+
+# Core/debug/runtime temp
+core
+core.*
+*.core
+vgcore.*
+
+# Editor/OS noise
+*~
+.*.swp
+.DS_Store
