@@ -1320,6 +1320,44 @@ static void playlistwin_focus_in(GtkWidget * widget, GdkEvent * event, gpointer 
 	draw_playlist_window(TRUE);
 }
 
+static gboolean playlistwin_scroll_event(GtkWidget *widget, GdkEventScroll *event, gpointer data)
+{
+	gdouble dx = 0.0, dy = 0.0;
+	int step = 0;
+
+	if (!event)
+		return FALSE;
+
+	switch (event->direction)
+	{
+	case GDK_SCROLL_UP:
+		step = -3;
+		break;
+	case GDK_SCROLL_DOWN:
+		step = 3;
+		break;
+	case GDK_SCROLL_SMOOTH:
+		if (gdk_event_get_scroll_deltas((GdkEvent *) event, &dx, &dy))
+		{
+			if (dy < 0.0)
+				step = -3;
+			else if (dy > 0.0)
+				step = 3;
+		}
+		break;
+	default:
+		break;
+	}
+
+	if (step != 0)
+	{
+		playlistwin_scroll(step);
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
 static void playlistwin_focus_out(GtkWidget * widget, GdkEventButton * event, gpointer callback_data)
 {
 	playlistwin_close->pb_allow_draw = FALSE;
@@ -1958,8 +1996,8 @@ static void playlistwin_create_gtk(void)
 	if (cfg.playlist_x != -1 && cfg.save_window_position)
 		dock_set_uposition(playlistwin, cfg.playlist_x, cfg.playlist_y);
 	gtk_widget_set_size_request(playlistwin, cfg.playlist_width, cfg.playlist_shaded ? 14 : cfg.playlist_height);
-	gtk_widget_set_events(playlistwin, GDK_FOCUS_CHANGE_MASK | GDK_BUTTON_MOTION_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK);
-	gtk_widget_add_events(playlistwin, GDK_FOCUS_CHANGE_MASK | GDK_BUTTON_MOTION_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK);
+	gtk_widget_set_events(playlistwin, GDK_FOCUS_CHANGE_MASK | GDK_BUTTON_MOTION_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_SCROLL_MASK);
+	gtk_widget_add_events(playlistwin, GDK_FOCUS_CHANGE_MASK | GDK_BUTTON_MOTION_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_SCROLL_MASK);
 	gtk_widget_realize(playlistwin);
 	hint_set_skip_winlist(playlistwin);
 	playlistwin_set_hints();
@@ -1969,6 +2007,7 @@ static void playlistwin_create_gtk(void)
 	g_signal_connect(G_OBJECT(playlistwin), "button-press-event", G_CALLBACK(playlistwin_press), NULL);
 	g_signal_connect(G_OBJECT(playlistwin), "button-release-event", G_CALLBACK(playlistwin_release), NULL);
 	g_signal_connect(G_OBJECT(playlistwin), "motion-notify-event", G_CALLBACK(playlistwin_motion), NULL);
+	g_signal_connect(G_OBJECT(playlistwin), "scroll-event", G_CALLBACK(playlistwin_scroll_event), NULL);
 	g_signal_connect(G_OBJECT(playlistwin), "focus-in-event", G_CALLBACK(playlistwin_focus_in), NULL);
 	g_signal_connect(G_OBJECT(playlistwin), "focus-out-event", G_CALLBACK(playlistwin_focus_out), NULL);
 	g_signal_connect(G_OBJECT(playlistwin), "configure-event", G_CALLBACK(playlistwin_configure), NULL);
