@@ -95,7 +95,7 @@ void svis_timeout_func(SVis * svis, guchar * data)
 void svis_draw(Widget * w)
 {
 	SVis *svis = (SVis *) w;
-	gint x, y, h;
+	gint x, y, h, h2;
 	guchar svis_color[24][3];
 	guchar rgb_data[SVIS_WIDTH * 2 * SVIS_HEIGHT * 2], *ptr, c;
 	guint32 colors[24];
@@ -152,9 +152,50 @@ void svis_draw(Widget * w)
 		{
 			for (x = 0; x < 38; x++)
 			{
-				h = svis->vs_data[x << 1] / 3;
-				ptr = rgb_data + ((4 - h) * 38) + x;
-				*ptr = svis_scope_colors[h];
+				switch (cfg.scope_mode)
+				{
+					case SCOPE_DOT:
+						h = svis->vs_data[x << 1] / 3;
+						ptr = rgb_data + ((4 - h) * 38) + x;
+						*ptr = svis_scope_colors[h];
+						break;
+					case SCOPE_LINE:
+						if (x != 37)
+						{
+							h = 4 - (svis->vs_data[x << 1] / 3);
+							h2 = 4 - (svis->vs_data[(x + 1) << 1] / 3);
+							if (h > h2)
+							{
+								y = h;
+								h = h2;
+								h2 = y;
+							}
+							ptr = rgb_data + (h * 38) + x;
+							for (y = h; y <= h2; y++, ptr += 38)
+								*ptr = svis_scope_colors[4 - y];
+						}
+						else
+						{
+							h = svis->vs_data[x << 1] / 3;
+							ptr = rgb_data + ((4 - h) * 38) + x;
+							*ptr = svis_scope_colors[h];
+						}
+						break;
+					case SCOPE_SOLID:
+						h = 4 - (svis->vs_data[x << 1] / 3);
+						h2 = 2;
+						c = svis_scope_colors[4 - h];
+						if (h > h2)
+						{
+							y = h;
+							h = h2;
+							h2 = y;
+						}
+						ptr = rgb_data + (h * 38) + x;
+						for (y = h; y <= h2; y++, ptr += 38)
+							*ptr = c;
+						break;
+				}
 			}
 		}
 
@@ -202,12 +243,67 @@ void svis_draw(Widget * w)
 		{
 			for (x = 0; x < 38; x++)
 			{
-				h = svis->vs_data[x << 1] / 3;
-				ptr = rgb_data + ((4 - h) * 152) + (x << 1);
-				*ptr = svis_scope_colors[h];
-				*(ptr + 1) = svis_scope_colors[h];
-				*(ptr + 76) = svis_scope_colors[h];
-				*(ptr + 77) = svis_scope_colors[h];
+				switch (cfg.scope_mode)
+				{
+					case SCOPE_DOT:
+						h = svis->vs_data[x << 1] / 3;
+						ptr = rgb_data + ((4 - h) * 152) + (x << 1);
+						*ptr = svis_scope_colors[h];
+						*(ptr + 1) = svis_scope_colors[h];
+						*(ptr + 76) = svis_scope_colors[h];
+						*(ptr + 77) = svis_scope_colors[h];
+						break;
+					case SCOPE_LINE:
+						if (x != 37)
+						{
+							h = 4 - (svis->vs_data[x << 1] / 3);
+							h2 = 4 - (svis->vs_data[(x + 1) << 1] / 3);
+							if (h > h2)
+							{
+								y = h;
+								h = h2;
+								h2 = y;
+							}
+							ptr = rgb_data + (h * 152) + (x << 1);
+							for (y = h; y <= h2; y++, ptr += 152)
+							{
+								c = svis_scope_colors[4 - y];
+								*ptr = c;
+								*(ptr + 1) = c;
+								*(ptr + 76) = c;
+								*(ptr + 77) = c;
+							}
+						}
+						else
+						{
+							h = svis->vs_data[x << 1] / 3;
+							ptr = rgb_data + ((4 - h) * 152) + (x << 1);
+							*ptr = svis_scope_colors[h];
+							*(ptr + 1) = svis_scope_colors[h];
+							*(ptr + 76) = svis_scope_colors[h];
+							*(ptr + 77) = svis_scope_colors[h];
+						}
+						break;
+					case SCOPE_SOLID:
+						h = 4 - (svis->vs_data[x << 1] / 3);
+						h2 = 2;
+						c = svis_scope_colors[4 - h];
+						if (h > h2)
+						{
+							y = h;
+							h = h2;
+							h2 = y;
+						}
+						ptr = rgb_data + (h * 152) + (x << 1);
+						for (y = h; y <= h2; y++, ptr += 152)
+						{
+							*ptr = c;
+							*(ptr + 1) = c;
+							*(ptr + 76) = c;
+							*(ptr + 77) = c;
+						}
+						break;
+				}
 			}
 		}
 

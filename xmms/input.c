@@ -523,33 +523,36 @@ void input_update_vis(int time)
 {
 	GList *node;
 	struct vis_node *vis = NULL;
-	gboolean found = FALSE;
 
 	pthread_mutex_lock(&vis_mutex);
 	node = vis_list;
-	while (g_list_next(node) && !found)
-	{
-		struct vis_node *visnext = node->next->data;
-		vis = node->data;
 
-		if (!(vis->time < time))
+	/*
+	 * Keep the newest sample that is <= current playback time by dropping
+	 * older head nodes while a newer eligible node exists.
+	 */
+	while (node && g_list_next(node))
+	{
+		struct vis_node *head = node->data;
+		struct vis_node *next = node->next->data;
+
+		if (next->time > time)
 			break;
 
 		vis_list = g_list_remove_link(vis_list, node);
 		g_list_free_1(node);
-		if (visnext->time >= time)
-		{
-			found = TRUE;
-			break;
-		}
-		g_free(vis);
+		g_free(head);
 		node = vis_list;
 	}
+
+	if (vis_list)
+		vis = vis_list->data;
+
 	pthread_mutex_unlock(&vis_mutex);
-	if (found)
+
+	if (vis)
 	{
 		vis_send_data(vis->data, vis->nch, vis->length);
-		g_free(vis);
 	}
 	else
 		vis_send_data(NULL, 0, 0);

@@ -280,6 +280,8 @@ static void load_skin_pixmap(SkinPixmap *skinpixmap,
 {
 	char *filename;
 	gint w, h;
+	gboolean enable_hires_compat = TRUE;
+	const gchar *compat_env;
 
 	filename = find_file_recursively(path, file);
 
@@ -293,6 +295,43 @@ static void load_skin_pixmap(SkinPixmap *skinpixmap,
 	if (!skinpixmap->pixmap)
 		return;
 	gdk_window_get_size(skinpixmap->pixmap, &w, &h);
+
+	/*
+	 * Hi-res Winamp skins often store 2x/4x artwork while XMMS uses
+	 * fixed classic coordinates. Scale oversized bitmaps down so the
+	 * classic hitboxes and draw offsets remain usable.
+	 */
+	compat_env = g_getenv("XMMS_SKIN_HIRES_COMPAT");
+	if (compat_env &&
+	    (!strcmp(compat_env, "0") || !g_ascii_strcasecmp(compat_env, "false") ||
+	     !g_ascii_strcasecmp(compat_env, "no")))
+		enable_hires_compat = FALSE;
+
+	if (enable_hires_compat &&
+	    (w > skinpixmap->width || h > skinpixmap->height) &&
+	    w > 0 && h > 0 && skinpixmap->width > 0 && skinpixmap->height > 0)
+	{
+		cairo_surface_t *scaled = cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
+								      skinpixmap->width,
+								      skinpixmap->height);
+		cairo_t *cr = cairo_create(scaled);
+		double sx = (double) skinpixmap->width / (double) w;
+		double sy = (double) skinpixmap->height / (double) h;
+		cairo_pattern_t *pattern;
+
+		cairo_scale(cr, sx, sy);
+		cairo_set_source_surface(cr, skinpixmap->pixmap, 0, 0);
+		pattern = cairo_get_source(cr);
+		if (pattern)
+			cairo_pattern_set_filter(pattern, CAIRO_FILTER_NEAREST);
+		cairo_paint(cr);
+		cairo_destroy(cr);
+
+		gdk_pixmap_unref(skinpixmap->pixmap);
+		skinpixmap->pixmap = scaled;
+		w = skinpixmap->width;
+		h = skinpixmap->height;
+	}
 
 	skinpixmap->current_width = MIN(w, skinpixmap->width);
 	skinpixmap->current_height = MIN(h, skinpixmap->height);

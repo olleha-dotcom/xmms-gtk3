@@ -30,7 +30,7 @@ gettextsrcdir = $(datadir)/gettext/po
 
 INSTALL = /usr/bin/install -c
 INSTALL_DATA = ${INSTALL} -m 644
-mkinstalldirs = $(SHELL) ${SHELL} /home/olle/work/xmms-1.2.11/install-sh -d
+mkinstalldirs = $(SHELL) ${SHELL} /home/olle/work/xmms-gtk3/install-sh -d
 mkdir_p = $(MKDIR_P)
 
 GMSGFMT_ = @GMSGFMT@

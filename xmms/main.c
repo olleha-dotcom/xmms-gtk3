@@ -3072,8 +3072,24 @@ void mainwin_vis_menu_callback(gpointer cb_data, guint action, GtkWidget * w)
 	case MAINWIN_VIS_SCOPE_DOT:
 	case MAINWIN_VIS_SCOPE_LINE:
 	case MAINWIN_VIS_SCOPE_SOLID:
+	{
+		const gchar *mode_name = "Dot";
 		cfg.scope_mode = action - MAINWIN_VIS_SCOPE_DOT;
+		if (cfg.scope_mode == SCOPE_LINE)
+			mode_name = "Line";
+		else if (cfg.scope_mode == SCOPE_SOLID)
+			mode_name = "Solid";
+
+		g_message("Scope Mode changed to: %s", mode_name);
+		mainwin_lock_info_text(g_strdup_printf("Scope Mode: %s", mode_name));
+
+		/* Force immediate visual refresh with the new rendering mode. */
+		vis_clear_data(active_vis);
+		svis_clear_data(mainwin_svis);
+		vis_clear(active_vis);
+		svis_clear(mainwin_svis);
 		break;
+	}
 	case MAINWIN_VIS_VU_NORMAL:
 	case MAINWIN_VIS_VU_SMOOTH:
 		cfg.vu_mode = action - MAINWIN_VIS_VU_NORMAL;
@@ -3712,10 +3728,16 @@ gint idle_func(gpointer data)
 	gchar stime_prefix, *tmp;
 	static gboolean waiting = FALSE;
 	static gint count = 0;
+	static gboolean was_playing = FALSE;
+	static gint last_time_ms = -1;
+	static gint stalled_ticks = 0;
+	gboolean is_playing;
 
 	static GTimer *pause_timer = NULL;
 
-	if (get_input_playing())
+	is_playing = get_input_playing();
+
+	if (is_playing)
 	{
 		GDK_THREADS_ENTER();
 		vis_playback_start();
@@ -3775,6 +3797,61 @@ gint idle_func(gpointer data)
 			length = playlist_get_current_length();
 			playlistwin_set_time(time, length, cfg.timer_mode);
 			input_update_vis(time);
+
+			/*
+			 * Hard safety: if plugin reports we are at track end but does
+			 * not emit EOF, advance explicitly.
+			 */
+			if (!get_input_paused() &&
+			    length > 0 &&
+			    time >= (length - 120))
+			{
+				GDK_THREADS_ENTER();
+				playlist_eof_reached();
+				GDK_THREADS_LEAVE();
+				waiting = FALSE;
+				stalled_ticks = 0;
+				last_time_ms = -1;
+				is_playing = get_input_playing();
+				if (!is_playing)
+					goto idle_draw_and_return;
+				time = input_get_time();
+				length = playlist_get_current_length();
+			}
+
+			/*
+			 * Some plugins can get stuck on the final seconds and never
+			 * report EOF. If time no longer advances near the known track
+			 * end for a while, force EOF handling.
+			 */
+			if (!get_input_paused() &&
+			    length > 0 &&
+			    time >= (length - 15000))
+			{
+				gint stall_limit = (time >= (length - 1200)) ? 40 : 300;
+
+				if (last_time_ms >= 0 && time <= (last_time_ms + 50))
+					stalled_ticks++;
+				else
+					stalled_ticks = 0;
+
+				if (stalled_ticks >= stall_limit)
+				{
+					GDK_THREADS_ENTER();
+					playlist_eof_reached();
+					GDK_THREADS_LEAVE();
+					waiting = FALSE;
+					stalled_ticks = 0;
+					last_time_ms = -1;
+					is_playing = get_input_playing();
+					if (!is_playing)
+						goto idle_draw_and_return;
+					time = input_get_time();
+					length = playlist_get_current_length();
+				}
+			}
+			else
+				stalled_ticks = 0;
 
 			if (cfg.timer_mode == TIMER_REMAINING)
 			{
@@ -3863,14 +3940,41 @@ gint idle_func(gpointer data)
 
 		if(time != -1)
 			waiting = FALSE;
+
+		last_time_ms = time;
 	}
 	else
 	{
+		/*
+		 * Some output/input backends may flip the playing flag to FALSE
+		 * at song end without first reporting time == -1. Detect that by
+		 * checking that we were very close to track end.
+		 */
+		if (was_playing &&
+		    !get_input_paused() &&
+		    last_time_ms >= 0)
+		{
+			gint current_length = playlist_get_current_length();
+			if (current_length > 0 && last_time_ms >= (current_length - 5000))
+			{
+			GDK_THREADS_ENTER();
+			playlist_eof_reached();
+			GDK_THREADS_LEAVE();
+			is_playing = get_input_playing();
+			}
+		}
+
+		if (!is_playing)
+		{
 		GDK_THREADS_ENTER();
 		vis_playback_stop();
 		GDK_THREADS_LEAVE();
+		}
+		last_time_ms = -1;
+		stalled_ticks = 0;
 	}
 
+idle_draw_and_return:
 
 	GDK_THREADS_ENTER();
 	check_ctrlsocket();
@@ -3899,6 +4003,7 @@ gint idle_func(gpointer data)
 	}
 
 	GDK_THREADS_LEAVE();
+	was_playing = get_input_playing();
 
 	return TRUE;
 

@@ -2243,9 +2243,29 @@ static inline void gtk_item_factory_create_items(GtkItemFactory *ifactory, guint
 			g_free(utf8_label);
 			gtk_menu_item_set_submenu(GTK_MENU_ITEM(item), gtk_menu_new());
 		}
+		else if (g_strcmp0(entry->item_type, "<RadioItem>") == 0 ||
+			 (entry->item_type && entry->item_type[0] == '/'))
+		{
+			GSList *group = NULL;
+			GtkWidget *group_item = NULL;
+			const gchar *group_ref = NULL;
+			utf8_label = xmms_gtk_to_utf8_label(label);
+
+			if (entry->item_type && entry->item_type[0] == '/')
+				group_ref = entry->item_type;
+
+			if (group_ref)
+			{
+				group_item = g_hash_table_lookup(ifactory->path_map, group_ref);
+				if (GTK_IS_RADIO_MENU_ITEM(group_item))
+					group = gtk_radio_menu_item_get_group(GTK_RADIO_MENU_ITEM(group_item));
+			}
+
+			item = gtk_radio_menu_item_new_with_label(group, utf8_label);
+			g_free(utf8_label);
+		}
 		else if (g_strcmp0(entry->item_type, "<CheckItem>") == 0 ||
-			 g_strcmp0(entry->item_type, "<ToggleItem>") == 0 ||
-			 g_strcmp0(entry->item_type, "<RadioItem>") == 0)
+			 g_strcmp0(entry->item_type, "<ToggleItem>") == 0)
 		{
 			utf8_label = xmms_gtk_to_utf8_label(label);
 			item = gtk_check_menu_item_new_with_label(utf8_label);

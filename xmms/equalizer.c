@@ -222,8 +222,36 @@ void equalizerwin_eq_changed(void)
 
 void equalizerwin_on_pushed(gboolean toggled)
 {
+	InputPlugin *ip = get_current_input_plugin();
+	gboolean flat = TRUE;
+	int i;
+
 	cfg.equalizer_active = toggled;
 	equalizerwin_eq_changed();
+
+	if (!toggled)
+		return;
+
+	for (i = 0; i < 10; i++)
+	{
+		if (fabs(cfg.equalizer_bands[i]) > 0.01f)
+		{
+			flat = FALSE;
+			break;
+		}
+	}
+	if (fabs(cfg.equalizer_preamp) > 0.01f)
+		flat = FALSE;
+
+	if (get_input_playing() && ip && !ip->set_eq)
+	{
+		mainwin_lock_info_text(g_strdup(_("Equalizer: current input plugin does not support EQ")));
+		g_message("Equalizer enabled, but plugin '%s' has no set_eq()", ip->description ? ip->description : "(unknown)");
+	}
+	else if (flat)
+		mainwin_lock_info_text(g_strdup(_("Equalizer enabled (flat)")));
+	else
+		mainwin_lock_info_text(g_strdup(_("Equalizer enabled")));
 }
 
 void equalizerwin_presets_pushed(void)
@@ -338,18 +366,43 @@ static gboolean inside_sensitive_widgets(gint x, gint y)
 		inside_widget(x, y, equalizerwin_balance));
 }
 
+static void equalizerwin_map_event_xy(gdouble *x, gdouble *y, gdouble x_root, gdouble y_root)
+{
+	GdkWindow *window;
+	gint root_x = 0, root_y = 0;
+
+	if (!equalizerwin || !x || !y)
+		return;
+
+	window = gtk_widget_get_window(equalizerwin);
+	if (!window)
+		return;
+
+	gdk_window_get_root_origin(window, &root_x, &root_y);
+
+	/*
+	 * Use root-space coordinates and map them to window-local coordinates.
+	 * This avoids backend-specific differences in event->x/event->y scaling.
+	 */
+	*x = x_root - root_x;
+	*y = y_root - root_y;
+
+	if (cfg.doublesize && cfg.eq_doublesize_linked)
+	{
+		*x /= 2.0;
+		*y /= 2.0;
+	}
+}
+
 void equalizerwin_press(GtkWidget * widget, GdkEventButton * event, gpointer callback_data)
 {
 	gint mx, my;
 	gboolean grab = TRUE;
 
+	equalizerwin_map_event_xy(&event->x, &event->y, event->x_root, event->y_root);
+
 	mx = event->x;
 	my = event->y;
-	if (cfg.doublesize && cfg.eq_doublesize_linked)
-	{
-		event->x /= 2;
-		event->y /= 2;
-	}
 
 	if (event->button == 1 && event->type == GDK_BUTTON_PRESS &&
 	    ((cfg.easy_move || cfg.equalizer_shaded || event->y < 14) &&
@@ -399,11 +452,7 @@ void equalizerwin_motion(GtkWidget * widget, GdkEventMotion * event, gpointer ca
 {
 	XEvent ev;
 
-	if (cfg.doublesize && cfg.eq_doublesize_linked)
-	{
-		event->x /= 2;
-		event->y /= 2;
-	}
+	equalizerwin_map_event_xy(&event->x, &event->y, event->x_root, event->y_root);
 	if (dock_is_moving(equalizerwin))
 	{
 		dock_move_motion(equalizerwin, event);
@@ -425,6 +474,8 @@ void equalizerwin_motion(GtkWidget * widget, GdkEventMotion * event, gpointer ca
 
 void equalizerwin_release(GtkWidget * widget, GdkEventButton * event, gpointer callback_data)
 {
+	equalizerwin_map_event_xy(&event->x, &event->y, event->x_root, event->y_root);
+
 	gdk_pointer_ungrab(GDK_CURRENT_TIME);
 	gdk_flush();
 	if (dock_is_moving(equalizerwin))

@@ -24,6 +24,24 @@ mkdir -p "$DEBIAN_DIR"
 # Install project into staging.
 make install DESTDIR="$INSTALL_ROOT"
 
+# Install desktop integration.
+mkdir -p "${INSTALL_ROOT}/usr/share/applications" "${INSTALL_ROOT}/usr/share/pixmaps"
+if [ -f "${ROOT_DIR}/xmms/xmms.png" ]; then
+	install -m 0644 "${ROOT_DIR}/xmms/xmms.png" "${INSTALL_ROOT}/usr/share/pixmaps/xmms.png"
+fi
+cat > "${INSTALL_ROOT}/usr/share/applications/xmms.desktop" <<'DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=XMMS
+Comment=X Multimedia System
+Exec=xmms
+Icon=xmms
+Terminal=false
+StartupWMClass=XMMS_Player
+Categories=AudioVideo;Audio;Player;GTK;
+MimeType=audio/x-scpls;audio/x-mpegurl;audio/mpegurl;audio/mp3;audio/x-mp3;audio/mpeg;audio/x-mpeg;audio/x-wav;application/x-ogg;
+DESKTOP
+
 cat > "${DEBIAN_DIR}/control" <<CONTROL
 Package: ${PKG_NAME}
 Version: ${PKG_VERSION}-${PKG_REVISION}
@@ -41,6 +59,9 @@ cat > "${DEBIAN_DIR}/postinst" <<'POSTINST'
 set -e
 if [ "$1" = "configure" ] || [ "$1" = "triggered" ]; then
 	ldconfig
+	if command -v update-desktop-database >/dev/null 2>&1; then
+		update-desktop-database -q /usr/share/applications || true
+	fi
 fi
 exit 0
 POSTINST
@@ -50,6 +71,9 @@ cat > "${DEBIAN_DIR}/postrm" <<'POSTRM'
 set -e
 if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
 	ldconfig
+	if command -v update-desktop-database >/dev/null 2>&1; then
+		update-desktop-database -q /usr/share/applications || true
+	fi
 fi
 exit 0
 POSTRM
