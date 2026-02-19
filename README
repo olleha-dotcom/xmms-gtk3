@@ -18,7 +18,7 @@ Highlights in this branch:
 - Packaging helper: `packaging/build-deb.sh`.
 
 Versioning note:
-- The About dialog and package version identify this branch as 1.5.1
+- The About dialog and package version identify this branch as 1.5.2
   (GTK3 port line), while retaining XMMS 1.2.x codebase heritage.
 
 

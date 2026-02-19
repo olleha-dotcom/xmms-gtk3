@@ -5,7 +5,7 @@ AC_CANONICAL_HOST
 cflags_set=${CFLAGS+set}
 AC_CONFIG_HEADERS([config.h xmms/i18n.h])
 
-AM_INIT_AUTOMAKE([xmms], [1.5.1])
+AM_INIT_AUTOMAKE([xmms], [1.5.2])
 
 AC_ARG_ENABLE([one-plugin-dir],
 [  --enable-one-plugin-dir  use a single plugin dir [default=no]],,

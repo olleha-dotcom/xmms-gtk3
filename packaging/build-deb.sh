@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
 PKG_NAME="xmms-gtk3"
-PKG_VERSION="1.5.1"
+PKG_VERSION="1.5.2"
 PKG_REVISION="1ubuntu24.04"
 ARCH="$(dpkg --print-architecture)"
 MAINTAINER="Olle Hallnas <olle@example.invalid>"

@@ -3566,7 +3566,7 @@ fi
 # Define the identity of the package.
 
  PACKAGE=xmms
- VERSION=1.5.1
+ VERSION=1.5.2
 
 
 printf "%s\n" "#define PACKAGE \"$PACKAGE\"" >>confdefs.h
