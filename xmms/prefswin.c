@@ -1019,7 +1019,7 @@ void create_prefs_window(void)
 	prefswin_options_frame = gtk_frame_new(_("Options"));
 	gtk_box_pack_start(GTK_BOX(prefswin_options_vbox), prefswin_options_frame, FALSE, FALSE, 0);
 	gtk_container_set_border_width(GTK_CONTAINER(prefswin_options_frame), 5);
-	options_table = gtk_table_new(10, 2, FALSE);
+	options_table = gtk_table_new(11, 2, FALSE);
 	gtk_container_add(GTK_CONTAINER(prefswin_options_frame), options_table);
 	gtk_container_set_border_width(GTK_CONTAINER(options_table), 5);
 
@@ -1109,6 +1109,13 @@ void create_prefs_window(void)
 	gtk_tooltips_set_tip(prefswin_tooltips, opt,
 			     _("Store information such as song title and "
 			       "length to playlists"), NULL);
+
+	opt = prefswin_option_new_with_label_to_table(&cfg.resume_playback_on_startup,
+						      _("Resume playback position on startup"),
+						      GTK_TABLE(options_table), 0, 9);
+	gtk_tooltips_set_tip(prefswin_tooltips, opt,
+			     _("Remember current song time on exit and continue from that position next start"),
+			     NULL);
 
 	
 	gtk_notebook_append_page(GTK_NOTEBOOK(prefswin_notebook), prefswin_options_vbox, gtk_label_new(_("Options")));

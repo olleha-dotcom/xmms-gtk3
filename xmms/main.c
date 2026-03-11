@@ -82,6 +82,8 @@ Config cfg;
 static gboolean mainwin_force_redraw = FALSE;
 static gchar *mainwin_title_text = NULL;
 static gboolean mainwin_info_text_locked = FALSE;
+static gboolean startup_resume_seek_pending = FALSE;
+static gint startup_resume_seek_time = 0;
 
 /* For x11r5 session management */
 static char **restart_argv;
@@ -92,6 +94,24 @@ static GdkBitmap *nullmask;
 static gint balance;
 gboolean pposition_broken = FALSE;
 static pthread_mutex_t title_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void log_track_end_state(const char *reason, gint time, gint length, gint stalled_ticks)
+{
+	gint elapsed_sec, remaining_ms, remaining_sec;
+
+	if (time < 0 || length <= 0)
+		return;
+
+	elapsed_sec = time / 1000;
+	remaining_ms = MAX(length - time, 0);
+	remaining_sec = (remaining_ms + 999) / 1000;
+
+	g_message("Track end monitor: %s, remaining=%d:%02d, elapsed=%d:%02d, raw_ms=%d/%d, stalled_ticks=%d",
+		  reason,
+		  remaining_sec / 60, remaining_sec % 60,
+		  elapsed_sec / 60, elapsed_sec % 60,
+		  time, length, stalled_ticks);
+}
 
 extern gchar *plugin_dir_list[];
 
@@ -443,6 +463,9 @@ static void read_config(void)
 
 	cfg.snap_distance = 10;
 	cfg.pause_between_songs_time = 2;
+	cfg.resume_playback_on_startup = FALSE;
+	cfg.resume_playback_was_playing = FALSE;
+	cfg.resume_playback_time = 0;
 
 	cfg.vis_type = VIS_ANALYZER;
 	cfg.analyzer_mode = ANALYZER_NORMAL;
@@ -543,6 +566,9 @@ static void read_config(void)
 		xmms_cfg_read_boolean(cfgfile, "xmms", "random_skin_on_play", &cfg.random_skin_on_play);
 		xmms_cfg_read_boolean(cfgfile, "xmms", "pause_between_songs", &cfg.pause_between_songs);
 		xmms_cfg_read_int(cfgfile, "xmms", "pause_between_songs_time", &cfg.pause_between_songs_time);
+		xmms_cfg_read_boolean(cfgfile, "xmms", "resume_playback_on_startup", &cfg.resume_playback_on_startup);
+		xmms_cfg_read_boolean(cfgfile, "xmms", "resume_playback_was_playing", &cfg.resume_playback_was_playing);
+		xmms_cfg_read_int(cfgfile, "xmms", "resume_playback_time", &cfg.resume_playback_time);
 		xmms_cfg_read_int(cfgfile, "xmms", "mouse_wheel_change", &cfg.mouse_change);
 		xmms_cfg_read_boolean(cfgfile, "xmms", "show_wm_decorations", &cfg.show_wm_decorations);
 		if (xmms_cfg_read_int(cfgfile, "xmms", "url_history_length", &length))
@@ -698,6 +724,9 @@ void save_config(void)
 	xmms_cfg_write_boolean(cfgfile, "xmms", "random_skin_on_play", cfg.random_skin_on_play);
 	xmms_cfg_write_boolean(cfgfile, "xmms", "pause_between_songs", cfg.pause_between_songs);
 	xmms_cfg_write_int(cfgfile, "xmms", "pause_between_songs_time", cfg.pause_between_songs_time);
+	xmms_cfg_write_boolean(cfgfile, "xmms", "resume_playback_on_startup", cfg.resume_playback_on_startup);
+	xmms_cfg_write_boolean(cfgfile, "xmms", "resume_playback_was_playing", cfg.resume_playback_was_playing);
+	xmms_cfg_write_int(cfgfile, "xmms", "resume_playback_time", cfg.resume_playback_time);
 	xmms_cfg_write_int(cfgfile, "xmms", "mouse_wheel_change", cfg.mouse_change);
 	xmms_cfg_write_boolean(cfgfile, "xmms", "show_wm_decorations", cfg.show_wm_decorations);
 	xmms_cfg_write_string(cfgfile, "xmms", "eqpreset_default_file", cfg.eqpreset_default_file);
@@ -976,6 +1005,13 @@ void mainwin_shade_toggle(void)
 
 void mainwin_quit_cb(void)
 {
+	gint resume_time_ms = input_get_time();
+	cfg.resume_playback_was_playing = (get_input_playing() && !get_input_paused());
+	if (resume_time_ms > 0)
+		cfg.resume_playback_time = resume_time_ms / 1000;
+	else
+		cfg.resume_playback_time = 0;
+
 	input_stop();
 	gtk_widget_hide(equalizerwin);
 	gtk_widget_hide(playlistwin);
@@ -3731,6 +3767,9 @@ gint idle_func(gpointer data)
 	static gboolean was_playing = FALSE;
 	static gint last_time_ms = -1;
 	static gint stalled_ticks = 0;
+	static gint final_second_stall_ticks = 0;
+	static gint zero_remaining_ticks = 0;
+	static gint last_logged_remaining_sec = -1;
 	gboolean is_playing;
 
 	static GTimer *pause_timer = NULL;
@@ -3743,6 +3782,14 @@ gint idle_func(gpointer data)
 		vis_playback_start();
 		GDK_THREADS_LEAVE();
 		time = input_get_time();
+
+		if (startup_resume_seek_pending && time >= 0)
+		{
+			input_seek(startup_resume_seek_time);
+			startup_resume_seek_pending = FALSE;
+			time = input_get_time();
+		}
+
 		if (time == -1)
 		{
 			if(cfg.pause_between_songs)
@@ -3794,9 +3841,29 @@ gint idle_func(gpointer data)
 		}
 		else
 		{
+			gint remaining_ms, remaining_sec;
+
 			length = playlist_get_current_length();
 			playlistwin_set_time(time, length, cfg.timer_mode);
 			input_update_vis(time);
+			remaining_ms = (length > 0) ? MAX(length - time, 0) : -1;
+			remaining_sec = (remaining_ms >= 0) ? ((remaining_ms + 999) / 1000) : -1;
+
+			if (remaining_ms >= 0 && remaining_ms <= 15000)
+			{
+				if (remaining_sec != last_logged_remaining_sec)
+				{
+					log_track_end_state("countdown", time, length, stalled_ticks);
+					last_logged_remaining_sec = remaining_sec;
+				}
+			}
+			else
+				last_logged_remaining_sec = -1;
+
+			if (!get_input_paused() && remaining_sec == 0)
+				zero_remaining_ticks++;
+			else
+				zero_remaining_ticks = 0;
 
 			/*
 			 * Hard safety: if plugin reports we are at track end but does
@@ -3812,11 +3879,13 @@ gint idle_func(gpointer data)
 				waiting = FALSE;
 				stalled_ticks = 0;
 				last_time_ms = -1;
+				zero_remaining_ticks = 0;
 				is_playing = get_input_playing();
 				if (!is_playing)
 					goto idle_draw_and_return;
 				time = input_get_time();
 				length = playlist_get_current_length();
+				last_logged_remaining_sec = -1;
 			}
 
 			/*
@@ -3837,12 +3906,16 @@ gint idle_func(gpointer data)
 
 				if (stalled_ticks >= stall_limit)
 				{
+					log_track_end_state("stalled-final-ms", time, length, stalled_ticks);
 					GDK_THREADS_ENTER();
 					playlist_eof_reached();
 					GDK_THREADS_LEAVE();
 					waiting = FALSE;
 					stalled_ticks = 0;
+					final_second_stall_ticks = 0;
+					zero_remaining_ticks = 0;
 					last_time_ms = -1;
+					last_logged_remaining_sec = -1;
 					is_playing = get_input_playing();
 					if (!is_playing)
 						goto idle_draw_and_return;
@@ -3852,6 +3925,61 @@ gint idle_func(gpointer data)
 			}
 			else
 				stalled_ticks = 0;
+
+			/*
+			 * Some files stop on the final displayed second without the
+			 * millisecond counter ever quite reaching the metadata length.
+			 */
+			if (!get_input_paused() &&
+			    length > 0 &&
+			    (time / 1000) >= (length / 1000))
+			{
+				if (last_time_ms >= 0 && time <= (last_time_ms + 50))
+					final_second_stall_ticks++;
+				else
+					final_second_stall_ticks = 0;
+
+				if (final_second_stall_ticks >= 40)
+				{
+					log_track_end_state("stalled-final-second", time, length, final_second_stall_ticks);
+					GDK_THREADS_ENTER();
+					playlist_eof_reached();
+					GDK_THREADS_LEAVE();
+					waiting = FALSE;
+					stalled_ticks = 0;
+					final_second_stall_ticks = 0;
+					last_time_ms = -1;
+					last_logged_remaining_sec = -1;
+					is_playing = get_input_playing();
+					if (!is_playing)
+						goto idle_draw_and_return;
+					time = input_get_time();
+					length = playlist_get_current_length();
+				}
+			}
+			else
+				final_second_stall_ticks = 0;
+
+			if (!get_input_paused() &&
+			    length > 0 &&
+			    zero_remaining_ticks >= 100)
+			{
+				log_track_end_state("displayed-zero-remaining", time, length, zero_remaining_ticks);
+				GDK_THREADS_ENTER();
+				playlist_eof_reached();
+				GDK_THREADS_LEAVE();
+				waiting = FALSE;
+				stalled_ticks = 0;
+				final_second_stall_ticks = 0;
+				zero_remaining_ticks = 0;
+				last_time_ms = -1;
+				last_logged_remaining_sec = -1;
+				is_playing = get_input_playing();
+				if (!is_playing)
+					goto idle_draw_and_return;
+				time = input_get_time();
+				length = playlist_get_current_length();
+			}
 
 			if (cfg.timer_mode == TIMER_REMAINING)
 			{
@@ -3957,6 +4085,7 @@ gint idle_func(gpointer data)
 			gint current_length = playlist_get_current_length();
 			if (current_length > 0 && last_time_ms >= (current_length - 5000))
 			{
+			log_track_end_state("playback-flag-dropped", last_time_ms, current_length, stalled_ticks);
 			GDK_THREADS_ENTER();
 			playlist_eof_reached();
 			GDK_THREADS_LEAVE();
@@ -3972,6 +4101,9 @@ gint idle_func(gpointer data)
 		}
 		last_time_ms = -1;
 		stalled_ticks = 0;
+		final_second_stall_ticks = 0;
+		zero_remaining_ticks = 0;
+		last_logged_remaining_sec = -1;
 	}
 
 idle_draw_and_return:
@@ -4328,6 +4460,17 @@ void handle_cmd_line_options(struct cmdlineopt *opt, gboolean remote)
 		xmms_remote_quit(opt->session);
 }
 
+static gboolean cmdline_has_explicit_playback_request(struct cmdlineopt *opt)
+{
+	if (!opt)
+		return FALSE;
+
+	return (opt->filenames != NULL ||
+		opt->play || opt->pause || opt->stop ||
+		opt->fwd || opt->rew || opt->play_pause ||
+		opt->enqueue || opt->queue);
+}
+
 void segfault_handler(int sig)
 {
 	printf(_("\nSegmentation fault\n\n"
@@ -4464,6 +4607,7 @@ int main(int argc, char **argv)
 	const char *sm_client_id;
 	struct cmdlineopt options;
 	gboolean forced_x11_backend = FALSE;
+	gboolean explicit_playback_request = FALSE;
 #if defined(HAVE_SCHED_SETSCHEDULER) && defined(HAVE_SCHED_GET_PRIORITY_MAX)
 	struct sched_param sparam;
 #endif
@@ -4598,8 +4742,22 @@ gtk_inited:
 	playlist_set_position(cfg.playlist_position);
 	GDK_THREADS_LEAVE();
 	start_ctrlsocket();
+	explicit_playback_request = cmdline_has_explicit_playback_request(&options);
 	handle_cmd_line_options(&options, FALSE); 
 	GDK_THREADS_ENTER();
+
+	if (cfg.resume_playback_on_startup &&
+	    cfg.resume_playback_was_playing &&
+	    cfg.resume_playback_time > 0 &&
+	    !explicit_playback_request &&
+	    get_playlist_length() > 0)
+	{
+		playlist_set_position(cfg.playlist_position);
+		playlist_play();
+		startup_resume_seek_pending = TRUE;
+		startup_resume_seek_time = cfg.resume_playback_time;
+	}
+
 	mainwin_set_info_text();
 
 	gtk_widget_show(mainwin);

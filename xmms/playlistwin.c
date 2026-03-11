@@ -1786,7 +1786,19 @@ void draw_playlist_window(gboolean force)
 				w = (Widget *) wl->data;
 				if (w->redraw && w->visible)
 				{
-					gdk_window_clear_area(gtk_widget_get_window(playlistwin), w->x, w->y, w->width, w->height);
+					/*
+					 * Some GTK3/Cairo text paths can draw fractional pixels just
+					 * outside the widget rectangle. Clear a 1px margin to avoid
+					 * stale pixels at list edges while scrolling.
+					 */
+					gint clear_x = MAX(w->x - 1, 0);
+					gint clear_y = MAX(w->y - 1, 0);
+					gint clear_w = MIN(w->width + 2, cfg.playlist_width - clear_x);
+					gint clear_h = MIN(w->height + 2, PLAYLIST_HEIGHT - clear_y);
+
+					gdk_window_clear_area(gtk_widget_get_window(playlistwin),
+							      clear_x, clear_y,
+							      clear_w, clear_h);
 					w->redraw = FALSE;
 				}
 				wl = wl->next;
