@@ -17,7 +17,7 @@
 # USA.
 
 PACKAGE = xmms
-VERSION = 1.5.1
+VERSION = 1.5.2
 
 SHELL = /bin/sh
 

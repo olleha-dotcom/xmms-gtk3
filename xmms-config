@@ -17,7 +17,7 @@ exec_prefix="${prefix}"
 exec_prefix_set=no
 data_dir="${prefix}/share/xmms"
 
-version="1.5.1"
+version="1.5.2"
 include_dir="${prefix}/include"
 xmms_include_dir="${prefix}/include/xmms"
 lib_dir="${exec_prefix}/lib"

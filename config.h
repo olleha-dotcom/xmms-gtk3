@@ -269,7 +269,7 @@
 
 
 /* Version number of package */
-#define VERSION "1.5.1"
+#define VERSION "1.5.2"
 
 /* Define if building with support for X11R6 session management */
 #define WITH_SM /**/
