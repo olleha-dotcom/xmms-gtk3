@@ -1,3 +1,11 @@
+Mon Sep  7 12:35:00 CEST 2026  Olle Hallnas  <olle@olleha.com>
+
+	* GTK3 port maintenance release (1.5.3):
+	  - Hardened config file load/save diagnostics.
+	  - Replaced additional unsafe fixed-buffer string writes with
+	    bounded GLib helpers.
+	  - Improved robustness around playlist/config save failures.
+
 Sat Feb 14 21:05:00 CET 2026  Olle Hallnas  <olle@olleha.com>
 
 	* GTK3 port maintenance release (1.5.1 line):
