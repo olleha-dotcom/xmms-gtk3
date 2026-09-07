@@ -648,7 +648,9 @@ static inline void gtk_combo_set_popdown_strings(GtkCombo *combo, GList *strings
 	g_list_free(children);
 	for (node = strings; node != NULL; node = node->next)
 	{
-		GtkWidget *item = gtk_label_new(node->data ? (const gchar *) node->data : "");
+		GtkWidget *item;
+		const gchar *text = node->data ? (const gchar *) node->data : "";
+		item = gtk_label_new(text);
 		gtk_container_add(GTK_CONTAINER(combo->list), item);
 		gtk_widget_show(item);
 	}
@@ -681,7 +683,7 @@ static inline void gtk_list_select_item(GtkList *list, gint item)
 {
 	GList *children, *node;
 	gint idx = 0;
-	if (!list)
+	if (!list || item < 0)
 		return;
 	children = gtk_container_get_children(GTK_CONTAINER(list));
 	for (node = children; node != NULL; node = node->next, idx++)
@@ -691,7 +693,7 @@ static inline void gtk_list_select_item(GtkList *list, gint item)
 			GtkWidget *child = GTK_WIDGET(node->data);
 			GtkCombo *combo = g_object_get_data(G_OBJECT(list), "xmms-parent-combo");
 			const gchar *mapped = g_object_get_data(G_OBJECT(child), "xmms-combo-item-string");
-			if (combo && combo->entry)
+			if (combo && combo->entry && child)
 			{
 				if (mapped)
 					gtk_entry_set_text(GTK_ENTRY(combo->entry), mapped);

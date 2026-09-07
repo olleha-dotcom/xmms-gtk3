@@ -53,16 +53,23 @@ ConfigFile *xmms_cfg_open_file(gchar * filename)
 	struct stat stats;
 	ConfigSection *section = NULL;
 
-	g_return_val_if_fail(filename != NULL, FALSE);
+	g_return_val_if_fail(filename != NULL, NULL);
 
 	if (lstat(filename, &stats) == -1)
+	{
+		g_warning("xmms_cfg_open_file: failed to stat '%s': %s", filename, g_strerror(errno));
 		return NULL;
+	}
 	if (!(file = fopen(filename, "r")))
+	{
+		g_warning("xmms_cfg_open_file: failed to open '%s': %s", filename, g_strerror(errno));
 		return NULL;
+	}
 
 	buffer = g_malloc(stats.st_size + 1);
-	if (fread(buffer, 1, stats.st_size, file) != stats.st_size)
+	if (fread(buffer, 1, stats.st_size, file) != (size_t)stats.st_size)
 	{
+		g_warning("xmms_cfg_open_file: failed to read '%s'", filename);
 		g_free(buffer);
 		fclose(file);
 		return NULL;
@@ -128,7 +135,10 @@ gboolean xmms_cfg_write_file(ConfigFile * cfg, gchar * filename)
 	g_return_val_if_fail(filename != NULL, FALSE);
 
 	if (!(file = fopen(filename, "w")))
+	{
+		g_warning("xmms_cfg_write_file: failed to open '%s' for writing: %s", filename, g_strerror(errno));
 		return FALSE;
+	}
 
 	section_list = cfg->sections;
 	while (section_list)

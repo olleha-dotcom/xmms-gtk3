@@ -682,7 +682,7 @@ static GList *equalizerwin_read_presets(gchar * fname)
 	{
 		gchar section[21];
 		
-		sprintf(section, "Preset%d", p++);
+		g_snprintf(section, sizeof(section), "Preset%d", p++);
 		if (xmms_cfg_read_string(cfgfile, "Presets", section, &name))
 		{
 			preset = g_malloc(sizeof (EqualizerPreset));
@@ -692,7 +692,7 @@ static GList *equalizerwin_read_presets(gchar * fname)
 			for (i = 0; i < 10; i++)
 			{
 				gchar band[7];
-				sprintf(band, "Band%d", i);
+				g_snprintf(band, sizeof(band), "Band%d", i);
 				xmms_cfg_read_float(cfgfile, name, band,
 						    &preset->bands[i]);
 			}
@@ -1102,7 +1102,7 @@ static void equalizerwin_read_xmms_preset(ConfigFile *cfgfile)
 	for (i = 0; i < 10; i++)
 	{
 		gchar tmp[7];
-		sprintf(tmp, "Band%d", i);
+		g_snprintf(tmp, sizeof(tmp), "Band%d", i);
 		if (xmms_cfg_read_float(cfgfile, "Equalizer preset", tmp, &val))
 			eqslider_set_position(equalizerwin_bands[i], val);
 	}
@@ -1300,7 +1300,7 @@ static void equalizerwin_save_filesel_ok(GtkWidget * w, GtkFileSelection * files
 	for (i = 0; i < 10; i++)
 	{
 		gchar tmp[7];
-		sprintf(tmp, "Band%d", i);
+		g_snprintf(tmp, sizeof(tmp), "Band%d", i);
 		xmms_cfg_write_float(cfgfile, "Equalizer preset", tmp,
 				     eqslider_get_position(equalizerwin_bands[i]));
 	}
@@ -1325,7 +1325,7 @@ static void equalizerwin_save_winamp_filesel_ok(GtkWidget * w, GtkFileSelection 
 	{
 		fwrite("Winamp EQ library file v1.1\x1a!--", 1, 31, file);
 		memset(name, 0, 257);
-		strcpy(name, "Entry1");
+		g_strlcpy(name, "Entry1", 257);
 		fwrite(name, 1, 257, file);
 		for (i = 0; i < 10; i++)
 			bands[i] = 63 - (((eqslider_get_position(equalizerwin_bands[i]) + 20) * 63) / 40);

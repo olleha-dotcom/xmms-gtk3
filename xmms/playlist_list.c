@@ -459,11 +459,11 @@ void playlist_list_draw(Widget * w)
 		pos = playlist_get_queue_position(entry);
 		
 		if (pos != -1)
-			sprintf(qstr, "|%d|%s", pos + 1,
+			g_snprintf(qstr, sizeof(qstr), "|%d|%s", pos + 1,
 				entry->length != -1 ? " " : "");
 
 		if (entry->length != -1)
-			sprintf(length, "%d:%-2.2d", entry->length / 60000,
+			g_snprintf(length, sizeof(length), "%d:%-2.2d", entry->length / 60000,
 				(entry->length / 1000) % 60);
 
 		if (pos != -1 || entry->length != -1)
@@ -471,7 +471,7 @@ void playlist_list_draw(Widget * w)
 			int x, y;
 			char tail[60];
 
-			sprintf(tail, "%s%s", qstr, length);
+			g_snprintf(tail, sizeof(tail), "%s%s", qstr, length);
 			x = pl->pl_widget.x + width -
 				gdk_text_width(playlist_list_font,
 					       tail, strlen(tail)) - 2;

@@ -1449,10 +1449,10 @@ void show_prefs_window(void)
 	gtk_entry_set_text(GTK_ENTRY(prefswin_options_font_entry), cfg.playlist_font);
 	gtk_entry_set_text(GTK_ENTRY(prefswin_mainwin_font_entry), cfg.mainwin_font);
 	gtk_entry_set_text(GTK_ENTRY(prefswin_title_entry), cfg.gentitle_format);
-	sprintf(temp, "%u", cfg.snap_distance);
+	g_snprintf(temp, sizeof(temp), "%u", cfg.snap_distance);
 	gtk_entry_set_text(GTK_ENTRY(prefswin_options_sd_entry), temp);
 	prefswin_options_read_data();
-	sprintf(temp, "%u", cfg.pause_between_songs_time);
+	g_snprintf(temp, sizeof(temp), "%u", cfg.pause_between_songs_time);
 	gtk_entry_set_text(GTK_ENTRY(prefswin_options_pbs_entry), temp);
 	gtk_spin_button_set_value(GTK_SPIN_BUTTON(prefswin_options_mouse_spin), cfg.mouse_change);
 

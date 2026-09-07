@@ -486,6 +486,7 @@ static void read_config(void)
 	cfgfile = xmms_cfg_open_file(filename);
 	if (cfgfile)
 	{
+		g_debug("Loaded config from '%s'", filename);
 		xmms_cfg_read_boolean(cfgfile, "xmms", "allow_multiple_instances", &cfg.allow_multiple_instances);
 		xmms_cfg_read_boolean(cfgfile, "xmms", "use_realtime", &cfg.use_realtime);
 		xmms_cfg_read_boolean(cfgfile, "xmms", "always_show_cb", &cfg.always_show_cb);
@@ -547,7 +548,7 @@ static void read_config(void)
 		{
 			gchar eqtext[18];
 			
-			sprintf(eqtext, "equalizer_band%d", i);
+			g_snprintf(eqtext, sizeof(eqtext), "equalizer_band%d", i);
 			xmms_cfg_read_float(cfgfile, "xmms", eqtext, &cfg.equalizer_bands[i]);
 		}
 		xmms_cfg_read_string(cfgfile, "xmms", "eqpreset_default_file", &cfg.eqpreset_default_file);
@@ -577,7 +578,7 @@ static void read_config(void)
 			{
 				gchar str[19], *temp;
 				
-				sprintf(str, "url_history%d", i);
+				g_snprintf(str, sizeof(str), "url_history%d", i);
 				if (xmms_cfg_read_string(cfgfile, "xmms", str, &temp))
 					cfg.url_history = g_list_append(cfg.url_history, temp);
 			}
@@ -787,12 +788,14 @@ void save_config(void)
 	}
 	xmms_cfg_write_string(cfgfile, "xmms", "generic_title_format", cfg.gentitle_format);
 	
-	xmms_cfg_write_file(cfgfile, filename);
+	if (!xmms_cfg_write_file(cfgfile, filename))
+		g_warning("Failed to write config file '%s'", filename);
 	xmms_cfg_free(cfgfile);
 
 	g_free(filename);
 	filename = g_strconcat(g_get_home_dir(), "/.xmms/xmms.m3u", NULL);
-	playlist_save(filename, FALSE);
+	if (!playlist_save(filename, FALSE))
+		g_warning("Failed to save playlist '%s'", filename);
 	g_free(filename);
 }
 
@@ -1211,20 +1214,20 @@ static void mainwin_update_song_info(void)
 		int rate = bitrate / 1000;
 		if (rate < 1000)
 		{
-			sprintf(text, "%3d", rate);
+			g_snprintf(text, 4, "%3d", rate);
 			textbox_set_text(mainwin_rate_text, text);
 		}
 		else
 		{
 			rate /= 100;
-			sprintf(text, "%2dH", rate);
+			g_snprintf(text, 4, "%2dH", rate);
 			textbox_set_text(mainwin_rate_text, text);
 		}
 	}
 	else
 		textbox_set_text(mainwin_rate_text, "VBR");
 
-	sprintf(text, "%2d", frequency / 1000);
+	g_snprintf(text, 3, "%2d", frequency / 1000);
 	textbox_set_text(mainwin_freq_text, text);
 	monostereo_set_num_channels(mainwin_monostereo, numchannels);
 
@@ -1586,8 +1589,9 @@ void mainwin_jump_to_time_cb(GtkWidget * widget, GtkWidget * entry)
 {
 	guint min = 0, sec = 0, params, time;
 	gchar timestr[6];
+	const gchar *entry_text = gtk_entry_get_text(GTK_ENTRY(entry));
 
-	strcpy(timestr, gtk_entry_get_text(GTK_ENTRY(entry)));
+	g_strlcpy(timestr, entry_text ? entry_text : "", sizeof(timestr));
 
 	params = sscanf(timestr, "%u:%u", &min, &sec);
 	if (params == 2)
@@ -1654,7 +1658,7 @@ void mainwin_jump_to_time(void)
 	gtk_box_pack_start(GTK_BOX(hbox_total), label, FALSE, FALSE, 5);
 	gtk_widget_show(label);
 	len = playlist_get_current_length() / 1000;
-	sprintf(timestr, "%u:%2.2u", len / 60, len % 60);
+	g_snprintf(timestr, sizeof(timestr), "%u:%2.2u", len / 60, len % 60);
 	label = gtk_label_new(timestr);
 	gtk_box_pack_start(GTK_BOX(hbox_total), label, FALSE, FALSE, 10);
 	gtk_widget_show(label);
@@ -1676,7 +1680,7 @@ void mainwin_jump_to_time(void)
 	gtk_widget_show(cancel);
 
 	tindex = input_get_time() / 1000;
-	sprintf(timestr, "%u:%2.2u", tindex / 60, tindex % 60);
+	g_snprintf(timestr, sizeof(timestr), "%u:%2.2u", tindex / 60, tindex % 60);
 	gtk_entry_set_text(GTK_ENTRY(time_entry), timestr);
 	gtk_entry_select_region(GTK_ENTRY(time_entry), 0, strlen(timestr));
 
@@ -3813,9 +3817,9 @@ gint idle_func(gpointer data)
 				{
 					char temp[3];
 					
-					sprintf(temp,"%2.2d", timeleft / 60);
+					g_snprintf(temp, sizeof(temp), "%2.2d", timeleft / 60);
 					textbox_set_text(mainwin_stime_min, temp);
-					sprintf(temp,"%2.2d", timeleft % 60);
+					g_snprintf(temp, sizeof(temp), "%2.2d", timeleft % 60);
 					textbox_set_text(mainwin_stime_sec, temp);
 				}
 				
