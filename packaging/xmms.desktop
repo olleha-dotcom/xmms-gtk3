@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=XMMS
+Comment=X Multimedia System
+Exec=xmms %U
+Icon=xmms
+Terminal=false
+StartupWMClass=XMMS_Player
+Categories=AudioVideo;Audio;Player;GTK;
+MimeType=audio/x-scpls;audio/x-mpegurl;audio/mpeg;audio/x-wav;audio/ogg;application/ogg;

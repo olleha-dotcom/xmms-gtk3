@@ -279,6 +279,16 @@ static int vorbis_process_data(int last_section, gboolean use_rg, float rg_scale
 
 		if (vi->rate != samplerate || vi->channels != channels)
 		{
+			/* Format changes are not user Stop/Next: preserve the previous
+			 * section's queued tail before opening a new output stream. */
+			pthread_mutex_unlock(&vf_mutex);
+			while (vorbis_playing && seekneeded == -1 &&
+			       vorbis_ip.output->buffer_playing())
+				xmms_usleep(10000);
+			if (!vorbis_playing || seekneeded != -1)
+				return last_section;
+			pthread_mutex_lock(&vf_mutex);
+			vi = ov_info(&vf, -1);
 			samplerate = vi->rate;
 			channels = vi->channels;
 			vorbis_ip.output->buffer_free();

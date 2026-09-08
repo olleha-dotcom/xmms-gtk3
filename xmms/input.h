@@ -36,6 +36,7 @@ void input_play(char *filename);
 void input_stop(void);
 void input_pause(void);
 int input_get_time(void);
+guint input_get_generation(void);
 void input_set_eq(int on, float preamp, float *bands);
 void input_seek(int time);
 void input_get_song_info(gchar * filename, gchar ** title, gint * length);

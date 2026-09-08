@@ -2,278 +2,366 @@
 
 #include <string.h>
 #include <pulse/pulseaudio.h>
+#include <pulse/timeval.h>
 
-static pa_simple *pulse_conn = NULL;
-static gboolean pulse_paused = FALSE;
-static guint64 pulse_written_bytes = 0;
-static guint64 pulse_output_time_offset = 0;
-static gint pulse_bps = 1;
+/* All stream/control state is protected by the Pulse mainloop lock. */
+static pa_threaded_mainloop *pulse_loop;
+static pa_context *pulse_context;
+static pa_stream *pulse_stream;
+static pa_operation *pulse_drain;
+static gboolean pulse_paused, pulse_failed, pulse_drained = TRUE, pulse_flushing;
+static gboolean pulse_opening;
+static guint64 pulse_written_bytes, pulse_output_time_offset;
+static gint pulse_last_time;
+static pa_sample_spec pulse_spec;
 static gint pulse_channels = 2;
 static pa_sample_format_t pulse_format = PA_SAMPLE_S16NE;
-static gboolean pulse_convert_s8_to_u8 = FALSE;
-static gboolean pulse_convert_u16_to_s16 = FALSE;
-static gint pulse_soft_gain_left = 100;
-static gint pulse_soft_gain_right = 100;
-static gint pulse_hw_volume = 100;
-static gint pulse_cached_system_volume = -1;
-static gint64 pulse_cached_system_volume_at = 0;
-static gint pulse_cached_latency_ms = 0;
-static gint64 pulse_cached_latency_at = 0;
+static gboolean pulse_convert_s8_to_u8, pulse_convert_u16_to_s16;
+static gint pulse_soft_gain_left = 100, pulse_soft_gain_right = 100;
+static gint pulse_balance_left = 100, pulse_balance_right = 100;
+static gint pulse_requested_left = 100, pulse_requested_right = 100;
+static gint pulse_system_volume = -1, pulse_pending_volume = -1, pulse_sent_volume;
+static gboolean pulse_volume_inflight, pulse_software_volume;
+static pa_cvolume pulse_sink_volume;
+static gchar *pulse_sink_name;
+static guint pulse_save_source, pulse_reconnect_source;
+
+static void pulse_refresh_sink(void);
+static void pulse_apply_pending_volume(void);
+
+static void pulse_signal_stream(pa_stream *stream, void *data)
+{
+	pa_threaded_mainloop_signal(pulse_loop, 0);
+}
+
+static void pulse_write_ready(pa_stream *stream, size_t length, void *data)
+{
+	pa_threaded_mainloop_signal(pulse_loop, 0);
+}
 
 typedef struct
 {
-	pa_mainloop *ml;
-	pa_context *ctx;
-	gboolean done;
-	gboolean success;
-	gchar *default_sink;
+	gboolean expired;
+	pa_time_event *timer;
+} PulseWait;
+
+static void pulse_wait_timeout(pa_mainloop_api *api, pa_time_event *event,
+		const struct timeval *tv, void *data)
+{
+	((PulseWait *) data)->expired = TRUE;
+	pa_threaded_mainloop_signal(pulse_loop, 0);
+}
+
+static void pulse_wait_begin(PulseWait *wait)
+{
+	struct timeval deadline;
+	pa_mainloop_api *api = pa_threaded_mainloop_get_api(pulse_loop);
+	wait->expired = FALSE;
+	pa_timeval_add(pa_gettimeofday(&deadline), 5 * PA_USEC_PER_SEC);
+	wait->timer = api->time_new(api, &deadline, pulse_wait_timeout, wait);
+	if (!wait->timer)
+		wait->expired = TRUE;
+}
+
+static void pulse_wait_end(PulseWait *wait)
+{
+	if (wait->timer)
+		pa_threaded_mainloop_get_api(pulse_loop)->time_free(wait->timer);
+}
+
+static gboolean pulse_ready(void)
+{
+	return pulse_stream && !pulse_failed &&
+		pa_context_get_state(pulse_context) == PA_CONTEXT_READY &&
+		pa_stream_get_state(pulse_stream) == PA_STREAM_READY;
+}
+
+static void pulse_stream_success(pa_stream *stream, int success, void *data)
+{
+	if (data)
+		*(gint *) data = success;
+	else if (stream == pulse_stream && !success)
+		pulse_failed = TRUE;
+	pa_threaded_mainloop_signal(pulse_loop, 0);
+}
+
+/* Setup/seek acknowledgements have deadlines; volume queries never wait here. */
+static gboolean pulse_wait_operation(pa_operation *operation, gint *success)
+{
+	PulseWait wait;
+	gboolean ok;
+	if (!operation)
+		return FALSE;
+	pulse_wait_begin(&wait);
+	while (!wait.expired && pulse_ready() &&
+	       pa_operation_get_state(operation) == PA_OPERATION_RUNNING)
+		pa_threaded_mainloop_wait(pulse_loop);
+	ok = !wait.expired && *success &&
+		pa_operation_get_state(operation) == PA_OPERATION_DONE;
+	pa_operation_cancel(operation);
+	pa_operation_unref(operation);
+	pulse_wait_end(&wait);
+	return ok;
+}
+
+static void pulse_update_gains(void)
+{
+	pulse_soft_gain_left = pulse_software_volume ? pulse_requested_left : pulse_balance_left;
+	pulse_soft_gain_right = pulse_software_volume ? pulse_requested_right : pulse_balance_right;
+}
+
+static void pulse_volume_set_done(pa_context *context, int success, void *data)
+{
+	if (context != pulse_context)
+		return;
+	pulse_volume_inflight = FALSE;
+	pulse_software_volume = !success;
+	if (success && pulse_pending_volume == pulse_sent_volume)
+	{
+		pulse_system_volume = pulse_sent_volume;
+		pulse_pending_volume = -1;
+	}
+	pulse_update_gains();
+	if (success)
+		pulse_apply_pending_volume();
+}
+
+static void pulse_apply_pending_volume(void)
+{
+	pa_operation *op;
 	pa_cvolume volume;
-}
-PulseCtl;
-
-static void pulse_ctl_server_info_cb(pa_context *c, const pa_server_info *i, void *userdata)
-{
-	PulseCtl *ctl = (PulseCtl *) userdata;
-	if (!i || !i->default_sink_name)
-	{
-		ctl->success = FALSE;
-		ctl->done = TRUE;
+	if (pulse_pending_volume < 0 || pulse_volume_inflight || !pulse_sink_name ||
+	    !pulse_context || pa_context_get_state(pulse_context) != PA_CONTEXT_READY ||
+	    !pa_cvolume_valid(&pulse_sink_volume))
 		return;
+	pa_cvolume_set(&volume, pulse_sink_volume.channels,
+		(pa_volume_t) ((guint64) pulse_pending_volume * PA_VOLUME_NORM / 100));
+	pulse_sent_volume = pulse_pending_volume;
+	op = pa_context_set_sink_volume_by_name(pulse_context, pulse_sink_name,
+		&volume, pulse_volume_set_done, NULL);
+	if (op)
+	{
+		pulse_volume_inflight = TRUE;
+		pa_operation_unref(op);
 	}
-	ctl->default_sink = g_strdup(i->default_sink_name);
-	ctl->success = TRUE;
-	ctl->done = TRUE;
+	else
+	{
+		pulse_software_volume = TRUE;
+		pulse_update_gains();
+	}
 }
 
-static void pulse_ctl_sink_info_cb(pa_context *c, const pa_sink_info *i, int eol, void *userdata)
+static void pulse_sink_info(pa_context *context, const pa_sink_info *info,
+		int eol, void *data)
 {
-	PulseCtl *ctl = (PulseCtl *) userdata;
-	if (eol > 0)
-	{
-		if (!ctl->done)
-		{
-			ctl->success = FALSE;
-			ctl->done = TRUE;
-		}
+	if (context != pulse_context || !info || eol)
 		return;
-	}
-	if (!i)
-	{
-		ctl->success = FALSE;
-		ctl->done = TRUE;
-		return;
-	}
-	ctl->volume = i->volume;
-	ctl->success = TRUE;
-	ctl->done = TRUE;
+	g_free(pulse_sink_name);
+	pulse_sink_name = g_strdup(info->name);
+	pulse_sink_volume = info->volume;
+	if (pulse_pending_volume < 0 && !pulse_volume_inflight)
+		pulse_system_volume = CLAMP((gint) ((guint64) pa_cvolume_avg(&info->volume) *
+			100 / PA_VOLUME_NORM), 0, 100);
+	pulse_apply_pending_volume();
 }
 
-static void pulse_ctl_success_cb(pa_context *c, int success, void *userdata)
-{
-	PulseCtl *ctl = (PulseCtl *) userdata;
-	ctl->success = success ? TRUE : FALSE;
-	ctl->done = TRUE;
-}
-
-static gboolean pulse_ctl_wait_context_ready(PulseCtl *ctl)
-{
-	pa_context_state_t state;
-
-	while (TRUE)
-	{
-		state = pa_context_get_state(ctl->ctx);
-		if (state == PA_CONTEXT_READY)
-			return TRUE;
-		if (state == PA_CONTEXT_FAILED || state == PA_CONTEXT_TERMINATED)
-			return FALSE;
-		if (pa_mainloop_iterate(ctl->ml, 1, NULL) < 0)
-			return FALSE;
-	}
-}
-
-static gboolean pulse_ctl_wait_done(PulseCtl *ctl)
-{
-	while (!ctl->done)
-	{
-		pa_context_state_t state = pa_context_get_state(ctl->ctx);
-		if (state == PA_CONTEXT_FAILED || state == PA_CONTEXT_TERMINATED)
-			return FALSE;
-		if (pa_mainloop_iterate(ctl->ml, 1, NULL) < 0)
-			return FALSE;
-	}
-	return ctl->success;
-}
-
-static gboolean pulse_ctl_init(PulseCtl *ctl)
-{
-	memset(ctl, 0, sizeof(*ctl));
-
-	ctl->ml = pa_mainloop_new();
-	if (!ctl->ml)
-		return FALSE;
-
-	ctl->ctx = pa_context_new(pa_mainloop_get_api(ctl->ml), "xmms");
-	if (!ctl->ctx)
-		return FALSE;
-
-	if (pa_context_connect(ctl->ctx,
-				       (pulse_cfg.server && *pulse_cfg.server) ? pulse_cfg.server : NULL,
-				       PA_CONTEXT_NOFLAGS, NULL) < 0)
-		return FALSE;
-
-	return pulse_ctl_wait_context_ready(ctl);
-}
-
-static void pulse_ctl_cleanup(PulseCtl *ctl)
-{
-	if (ctl->ctx)
-	{
-		pa_context_disconnect(ctl->ctx);
-		pa_context_unref(ctl->ctx);
-	}
-	if (ctl->ml)
-		pa_mainloop_free(ctl->ml);
-	g_free(ctl->default_sink);
-}
-
-static gboolean pulse_ctl_get_default_sink(PulseCtl *ctl)
+static void pulse_request_sink(const char *name)
 {
 	pa_operation *op;
-
-	ctl->done = FALSE;
-	ctl->success = FALSE;
-	op = pa_context_get_server_info(ctl->ctx, pulse_ctl_server_info_cb, ctl);
-	if (!op)
-		return FALSE;
-	pa_operation_unref(op);
-
-	return pulse_ctl_wait_done(ctl) && ctl->default_sink && *ctl->default_sink;
+	if (!name)
+		return;
+	op = pa_context_get_sink_info_by_name(pulse_context, name, pulse_sink_info, NULL);
+	if (op)
+		pa_operation_unref(op);
 }
 
-static gboolean pulse_ctl_get_sink_volume(PulseCtl *ctl)
+static void pulse_server_info(pa_context *context, const pa_server_info *info, void *data)
+{
+	if (context == pulse_context && info)
+		pulse_request_sink(info->default_sink_name);
+}
+
+static void pulse_refresh_sink(void)
 {
 	pa_operation *op;
-
-	ctl->done = FALSE;
-	ctl->success = FALSE;
-	op = pa_context_get_sink_info_by_name(ctl->ctx, ctl->default_sink, pulse_ctl_sink_info_cb, ctl);
-	if (!op)
-		return FALSE;
-	pa_operation_unref(op);
-
-	return pulse_ctl_wait_done(ctl);
-}
-
-static gboolean pulse_get_system_volume(gint *percent)
-{
-	PulseCtl ctl;
-	gboolean ok = FALSE;
-	gint vol;
-
-	if (!percent)
-		return FALSE;
-	if (!pulse_ctl_init(&ctl))
-		return FALSE;
-	if (!pulse_ctl_get_default_sink(&ctl))
-		goto out;
-	if (!pulse_ctl_get_sink_volume(&ctl))
-		goto out;
-
-	vol = (gint) ((pa_cvolume_avg(&ctl.volume) * 100ULL) / PA_VOLUME_NORM);
-	*percent = CLAMP(vol, 0, 100);
-	ok = TRUE;
-
-out:
-	pulse_ctl_cleanup(&ctl);
-	return ok;
-}
-
-static gboolean pulse_get_system_volume_cached(gint *percent)
-{
-	const gint64 now = g_get_monotonic_time();
-	const gint64 cache_ttl_us = 1000 * 1000; /* 1s */
-
-	if (percent == NULL)
-		return FALSE;
-
-	if (pulse_cached_system_volume >= 0 &&
-	    now >= pulse_cached_system_volume_at &&
-	    (now - pulse_cached_system_volume_at) < cache_ttl_us)
+	if (!pulse_context || pa_context_get_state(pulse_context) != PA_CONTEXT_READY)
+		return;
+	if (pulse_ready())
+		pulse_request_sink(pa_stream_get_device_name(pulse_stream));
+	else if (pulse_cfg.device && *pulse_cfg.device)
+		pulse_request_sink(pulse_cfg.device);
+	else
 	{
-		*percent = pulse_cached_system_volume;
-		return TRUE;
+		op = pa_context_get_server_info(pulse_context, pulse_server_info, NULL);
+		if (op)
+			pa_operation_unref(op);
 	}
-
-	if (!pulse_get_system_volume(percent))
-		return FALSE;
-
-	pulse_cached_system_volume = CLAMP(*percent, 0, 100);
-	pulse_cached_system_volume_at = now;
-	return TRUE;
 }
 
-static gboolean pulse_set_system_volume(gint percent)
+static void pulse_subscription(pa_context *context, pa_subscription_event_type_t type,
+		uint32_t index, void *data)
 {
-	PulseCtl ctl;
-	pa_cvolume vol;
+	if ((type & PA_SUBSCRIPTION_EVENT_FACILITY_MASK) == PA_SUBSCRIPTION_EVENT_SINK ||
+	    (type & PA_SUBSCRIPTION_EVENT_FACILITY_MASK) == PA_SUBSCRIPTION_EVENT_SERVER)
+		pulse_refresh_sink();
+}
+
+static void pulse_stream_moved(pa_stream *stream, void *data)
+{
+	if (stream == pulse_stream)
+		pulse_refresh_sink();
+}
+
+static void pulse_context_state(pa_context *context, void *data)
+{
 	pa_operation *op;
-	pa_volume_t pvol;
-	gboolean ok = FALSE;
-	guint i;
-
-	if (!pulse_ctl_init(&ctl))
-		return FALSE;
-	if (!pulse_ctl_get_default_sink(&ctl))
-		goto out;
-	if (!pulse_ctl_get_sink_volume(&ctl))
-		goto out;
-
-	pvol = (pa_volume_t) ((((guint64) CLAMP(percent, 0, 100)) * PA_VOLUME_NORM) / 100ULL);
-	vol = ctl.volume;
-	for (i = 0; i < vol.channels; i++)
-		vol.values[i] = pvol;
-
-	ctl.done = FALSE;
-	ctl.success = FALSE;
-	op = pa_context_set_sink_volume_by_name(ctl.ctx, ctl.default_sink, &vol, pulse_ctl_success_cb, &ctl);
-	if (!op)
-		goto out;
-	pa_operation_unref(op);
-
-	ok = pulse_ctl_wait_done(&ctl);
-
-out:
-	pulse_ctl_cleanup(&ctl);
-	return ok;
+	if (pa_context_get_state(context) == PA_CONTEXT_READY)
+	{
+		pa_context_set_subscribe_callback(context, pulse_subscription, NULL);
+		op = pa_context_subscribe(context,
+			PA_SUBSCRIPTION_MASK_SINK | PA_SUBSCRIPTION_MASK_SERVER, NULL, NULL);
+		if (op)
+			pa_operation_unref(op);
+		pulse_refresh_sink();
+	}
+	pa_threaded_mainloop_signal(pulse_loop, 0);
 }
 
-static void pulse_update_software_gains(gint left, gint right)
+static void pulse_cancel_drain(void)
 {
-	gint base = MAX(left, right);
-
-	pulse_cfg.volume_left = CLAMP(left, 0, 100);
-	pulse_cfg.volume_right = CLAMP(right, 0, 100);
-	pulse_hw_volume = CLAMP(base, 0, 100);
-
-	if (pulse_hw_volume <= 0)
+	if (pulse_drain)
 	{
-		pulse_soft_gain_left = 100;
-		pulse_soft_gain_right = 100;
+		pa_operation_cancel(pulse_drain);
+		pa_operation_unref(pulse_drain);
+		pulse_drain = NULL;
+	}
+}
+
+static void pulse_disconnect_stream(void)
+{
+	pulse_cancel_drain();
+	if (pulse_stream)
+	{
+		pa_stream_set_state_callback(pulse_stream, NULL, NULL);
+		pa_stream_set_write_callback(pulse_stream, NULL, NULL);
+		pa_stream_set_moved_callback(pulse_stream, NULL, NULL);
+		pa_stream_disconnect(pulse_stream);
+		pa_stream_unref(pulse_stream);
+		pulse_stream = NULL;
+	}
+	pulse_written_bytes = pulse_output_time_offset = 0;
+	pulse_last_time = 0;
+	pulse_paused = pulse_flushing = FALSE;
+	pulse_drained = TRUE;
+}
+
+static void pulse_connect_context(void)
+{
+	if (pulse_context)
+	{
+		if (pulse_stream)
+			pulse_failed = TRUE;
+		pulse_disconnect_stream();
+		pa_context_set_state_callback(pulse_context, NULL, NULL);
+		pa_context_disconnect(pulse_context);
+		pa_context_unref(pulse_context);
+	}
+	pulse_volume_inflight = FALSE;
+	pulse_system_volume = -1;
+	pa_cvolume_init(&pulse_sink_volume);
+	g_clear_pointer(&pulse_sink_name, g_free);
+	pulse_context = pa_context_new(pa_threaded_mainloop_get_api(pulse_loop), "XMMS");
+	if (!pulse_context)
+		return;
+	pa_context_set_state_callback(pulse_context, pulse_context_state, NULL);
+	pa_context_connect(pulse_context,
+		(pulse_cfg.server && *pulse_cfg.server) ? pulse_cfg.server : NULL,
+		PA_CONTEXT_NOFLAGS, NULL);
+}
+
+static gboolean pulse_reconnect(gpointer data)
+{
+	if (pulse_loop)
+	{
+		pa_threaded_mainloop_lock(pulse_loop);
+		if (!pulse_opening &&
+		    (!pulse_context || !PA_CONTEXT_IS_GOOD(pa_context_get_state(pulse_context))))
+			pulse_connect_context();
+		pa_threaded_mainloop_unlock(pulse_loop);
+	}
+	return G_SOURCE_CONTINUE;
+}
+
+void pulse_start(void)
+{
+	gint base = MAX(pulse_cfg.volume_left, pulse_cfg.volume_right);
+	if (pulse_loop)
+		return;
+	pulse_requested_left = pulse_cfg.volume_left;
+	pulse_requested_right = pulse_cfg.volume_right;
+	pulse_balance_left = base ? pulse_requested_left * 100 / base : 100;
+	pulse_balance_right = base ? pulse_requested_right * 100 / base : 100;
+	pulse_update_gains();
+	pulse_loop = pa_threaded_mainloop_new();
+	if (!pulse_loop)
+		return;
+	if (pa_threaded_mainloop_start(pulse_loop) < 0)
+	{
+		pa_threaded_mainloop_free(pulse_loop);
+		pulse_loop = NULL;
 		return;
 	}
-
-	pulse_soft_gain_left = CLAMP((pulse_cfg.volume_left * 100 + pulse_hw_volume / 2) / pulse_hw_volume, 0, 100);
-	pulse_soft_gain_right = CLAMP((pulse_cfg.volume_right * 100 + pulse_hw_volume / 2) / pulse_hw_volume, 0, 100);
+	pa_threaded_mainloop_lock(pulse_loop);
+	pulse_connect_context();
+	pa_threaded_mainloop_unlock(pulse_loop);
+	pulse_reconnect_source = g_timeout_add_seconds(2, pulse_reconnect, NULL);
 }
 
-static void pulse_close_connection(void)
+static gboolean pulse_save_later(gpointer data)
 {
-	if (!pulse_conn)
-		return;
-	pa_simple_free(pulse_conn);
-	pulse_conn = NULL;
+	pulse_save_source = 0;
+	pulse_save_config();
+	return G_SOURCE_REMOVE;
 }
 
+void pulse_shutdown(void)
+{
+	if (pulse_save_source)
+	{
+		g_source_remove(pulse_save_source);
+		pulse_save_source = 0;
+		pulse_save_config();
+	}
+	if (pulse_reconnect_source)
+	{
+		g_source_remove(pulse_reconnect_source);
+		pulse_reconnect_source = 0;
+	}
+	if (!pulse_loop)
+		return;
+	pa_threaded_mainloop_lock(pulse_loop);
+	pulse_disconnect_stream();
+	if (pulse_context)
+	{
+		pa_context_set_state_callback(pulse_context, NULL, NULL);
+		pa_context_disconnect(pulse_context);
+		pa_context_unref(pulse_context);
+		pulse_context = NULL;
+	}
+	g_clear_pointer(&pulse_sink_name, g_free);
+	pa_threaded_mainloop_unlock(pulse_loop);
+	pa_threaded_mainloop_stop(pulse_loop);
+	pa_threaded_mainloop_free(pulse_loop);
+	pulse_loop = NULL;
+}
+
+/* The legacy OutputPlugin ABI has no cleanup hook; dlclose must stop callbacks. */
+#if defined(__GNUC__)
+static void __attribute__((destructor)) pulse_unload(void)
+{
+	pulse_shutdown();
+}
+#endif
 static gboolean pulse_map_format(AFormat fmt, pa_sample_format_t *out_fmt)
 {
 	pulse_convert_s8_to_u8 = FALSE;
@@ -409,217 +497,340 @@ static void pulse_transform_buffer(guchar *data, gint length)
 		pulse_apply_volume_s16(data, length);
 }
 
+static gint pulse_written_time_locked(void)
+{
+	guint64 time = pulse_output_time_offset +
+		pa_bytes_to_usec(pulse_written_bytes, &pulse_spec) / PA_USEC_PER_MSEC;
+	return (gint) MIN(time, G_MAXINT);
+}
+
+static gint pulse_output_time_locked(void)
+{
+	pa_usec_t latency;
+	int negative = 0;
+	gint written = pulse_written_time_locked();
+	gint64 played;
+	if (pulse_paused || pulse_flushing)
+		return pulse_last_time;
+	if (pulse_drained)
+		pulse_last_time = written;
+	else if (pa_stream_get_latency(pulse_stream, &latency, &negative) >= 0)
+	{
+		played = written - (negative ? 0 : (gint64) (latency / PA_USEC_PER_MSEC));
+		pulse_last_time = CLAMP(played, pulse_last_time, written);
+	}
+	return pulse_last_time;
+}
+
 int pulse_open(AFormat fmt, int rate, int nch)
 {
-	pa_sample_spec ss;
-	int err = 0;
-	const char *server = NULL;
-	const char *device = NULL;
-
-	pulse_close_connection();
-
-	if (!pulse_map_format(fmt, &pulse_format))
-	{
-		g_warning("pulse_open(): unsupported sample format %d", fmt);
+	PulseWait wait;
+	pa_buffer_attr attr;
+	gboolean ok = FALSE;
+	if (!pulse_loop)
 		return 0;
-	}
-
-	ss.format = pulse_format;
-	ss.rate = rate;
-	ss.channels = nch;
-
-	if (!pa_sample_spec_valid(&ss))
-	{
-		g_warning("pulse_open(): invalid sample spec");
-		return 0;
-	}
-
-	if (pulse_cfg.server && *pulse_cfg.server)
-		server = pulse_cfg.server;
-	if (pulse_cfg.device && *pulse_cfg.device)
-		device = pulse_cfg.device;
-
-	pulse_conn = pa_simple_new(
-		server,
-		"xmms",
-		PA_STREAM_PLAYBACK,
-		device,
-		(pulse_cfg.stream_name && *pulse_cfg.stream_name) ? pulse_cfg.stream_name : "XMMS",
-		&ss,
-		NULL,
-		NULL,
-		&err);
-
-	if (!pulse_conn)
-	{
-		g_warning("pulse_open(): %s", pa_strerror(err));
-		return 0;
-	}
-
+	pa_threaded_mainloop_lock(pulse_loop);
+	pulse_disconnect_stream();
+	pulse_failed = FALSE;
+	pulse_opening = TRUE;
+	if (!pulse_map_format(fmt, &pulse_format) || rate <= 0 || nch < 1 || nch > PA_CHANNELS_MAX)
+		goto out;
+	pulse_spec.format = pulse_format;
+	pulse_spec.rate = rate;
+	pulse_spec.channels = nch;
 	pulse_channels = nch;
-	pulse_bps = rate * nch * ((pulse_format == PA_SAMPLE_U8) ? 1 : 2);
-	if (pulse_bps <= 0)
-		pulse_bps = 1;
-	pulse_written_bytes = 0;
-	pulse_output_time_offset = 0;
-	pulse_paused = FALSE;
-	pulse_cached_system_volume = -1;
-	pulse_cached_system_volume_at = 0;
-	pulse_cached_latency_ms = 0;
-	pulse_cached_latency_at = 0;
-
-	return 1;
+	if (!pa_sample_spec_valid(&pulse_spec))
+		goto out;
+	if (!pulse_context || !PA_CONTEXT_IS_GOOD(pa_context_get_state(pulse_context)))
+		pulse_connect_context();
+	if (!pulse_context)
+		goto out;
+	pulse_wait_begin(&wait);
+	while (!wait.expired && PA_CONTEXT_IS_GOOD(pa_context_get_state(pulse_context)) &&
+	       pa_context_get_state(pulse_context) != PA_CONTEXT_READY)
+		pa_threaded_mainloop_wait(pulse_loop);
+	ok = !wait.expired && pa_context_get_state(pulse_context) == PA_CONTEXT_READY;
+	pulse_wait_end(&wait);
+	if (!ok)
+		goto out;
+	ok = FALSE;
+	pulse_stream = pa_stream_new(pulse_context,
+		(pulse_cfg.stream_name && *pulse_cfg.stream_name) ? pulse_cfg.stream_name : "XMMS",
+		&pulse_spec, NULL);
+	if (!pulse_stream)
+		goto out;
+	pa_stream_set_state_callback(pulse_stream, pulse_signal_stream, NULL);
+	pa_stream_set_write_callback(pulse_stream, pulse_write_ready, NULL);
+	pa_stream_set_moved_callback(pulse_stream, pulse_stream_moved, NULL);
+	attr.maxlength = pa_usec_to_bytes(2 * PA_USEC_PER_SEC, &pulse_spec);
+	attr.tlength = pa_usec_to_bytes(250 * PA_USEC_PER_MSEC, &pulse_spec);
+	/* Automatic prebuffering stops the read index running past an underrun. */
+	attr.prebuf = (uint32_t) -1;
+	attr.minreq = (uint32_t) -1;
+	attr.fragsize = (uint32_t) -1;
+	if (pa_stream_connect_playback(pulse_stream,
+		(pulse_cfg.device && *pulse_cfg.device) ? pulse_cfg.device : NULL, &attr,
+		PA_STREAM_INTERPOLATE_TIMING | PA_STREAM_AUTO_TIMING_UPDATE | PA_STREAM_ADJUST_LATENCY,
+		NULL, NULL) < 0)
+		goto out;
+	pulse_wait_begin(&wait);
+	while (!wait.expired && PA_CONTEXT_IS_GOOD(pa_context_get_state(pulse_context)) &&
+	       PA_STREAM_IS_GOOD(pa_stream_get_state(pulse_stream)) &&
+	       pa_stream_get_state(pulse_stream) != PA_STREAM_READY)
+		pa_threaded_mainloop_wait(pulse_loop);
+	ok = !wait.expired && pulse_ready();
+	pulse_wait_end(&wait);
+	if (ok)
+		pulse_refresh_sink();
+out:
+	pulse_opening = FALSE;
+	if (!ok)
+	{
+		gboolean creating = pulse_stream &&
+			pa_stream_get_state(pulse_stream) == PA_STREAM_CREATING;
+		g_warning("pulse_open(): %s", pulse_context ?
+			pa_strerror(pa_context_errno(pulse_context)) : "Cannot create PulseAudio context");
+		pulse_disconnect_stream();
+		/* A timed-out creation has no channel to disconnect yet. */
+		if (creating)
+			pa_context_disconnect(pulse_context);
+		pulse_failed = TRUE;
+	}
+	pa_threaded_mainloop_unlock(pulse_loop);
+	return ok;
 }
 
 void pulse_write(void *ptr, int length)
 {
-	guchar *tmp = NULL;
-	gboolean need_transform;
-	int err = 0;
-
-	if (!pulse_conn || !ptr || length <= 0 || pulse_paused)
+	guchar *copy = NULL;
+	if (!pulse_loop || !ptr || length <= 0)
 		return;
-
-	need_transform = pulse_convert_s8_to_u8 || pulse_convert_u16_to_s16 ||
-			 pulse_soft_gain_left != 100 || pulse_soft_gain_right != 100;
-	if (need_transform)
+	pa_threaded_mainloop_lock(pulse_loop);
+	if (!pulse_ready() || pulse_flushing)
+		goto out;
+	if (length % pa_frame_size(&pulse_spec))
 	{
-		tmp = g_memdup(ptr, (gsize) length);
-		pulse_transform_buffer(tmp, length);
-		ptr = tmp;
+		pulse_failed = TRUE;
+		goto out;
 	}
-
-	if (pa_simple_write(pulse_conn, ptr, (size_t) length, &err) < 0)
-		g_warning("pulse_write(): %s", pa_strerror(err));
+	if (pulse_convert_s8_to_u8 || pulse_convert_u16_to_s16 ||
+	    pulse_soft_gain_left != 100 || pulse_soft_gain_right != 100)
+	{
+		copy = g_malloc(length);
+		memcpy(copy, ptr, length);
+		pulse_transform_buffer(copy, length);
+		ptr = copy;
+	}
+	pulse_cancel_drain();
+	if (pa_stream_write(pulse_stream, ptr, length, NULL, 0, PA_SEEK_RELATIVE) < 0)
+		pulse_failed = TRUE;
 	else
-		pulse_written_bytes += (guint64) length;
-
-	g_free(tmp);
+	{
+		pulse_written_bytes += length;
+		pulse_drained = FALSE;
+	}
+out:
+	g_free(copy);
+	pa_threaded_mainloop_unlock(pulse_loop);
 }
 
 void pulse_close(void)
 {
-	int err = 0;
-
-	if (pulse_conn && !pulse_paused)
-		pa_simple_drain(pulse_conn, &err);
-
-	pulse_close_connection();
-	pulse_written_bytes = 0;
-	pulse_output_time_offset = 0;
-	pulse_paused = FALSE;
-	pulse_cached_system_volume = -1;
-	pulse_cached_system_volume_at = 0;
-	pulse_cached_latency_ms = 0;
-	pulse_cached_latency_at = 0;
+	if (!pulse_loop)
+		return;
+	pa_threaded_mainloop_lock(pulse_loop);
+	/* EOF has already drained. Stop/Next must discard queued sound immediately. */
+	pulse_disconnect_stream();
+	pa_threaded_mainloop_unlock(pulse_loop);
 }
 
 void pulse_flush(int time)
 {
-	int err = 0;
-
-	if (pulse_conn)
-		pa_simple_flush(pulse_conn, &err);
+	gint success = 0;
+	gboolean ok = FALSE;
+	if (!pulse_loop)
+		return;
+	pa_threaded_mainloop_lock(pulse_loop);
+	pulse_cancel_drain();
+	pulse_flushing = TRUE;
 	pulse_written_bytes = 0;
-	pulse_output_time_offset = (time >= 0) ? (guint64) time : 0;
+	pulse_output_time_offset = MAX(0, time);
+	pulse_last_time = MAX(0, time);
+	pulse_drained = TRUE;
+	if (pulse_ready())
+	{
+		ok = pulse_wait_operation(pa_stream_flush(pulse_stream,
+			pulse_stream_success, &success), &success);
+		if (ok)
+		{
+			success = 0;
+			ok = pulse_wait_operation(pa_stream_update_timing_info(pulse_stream,
+				pulse_stream_success, &success), &success);
+		}
+	}
+	pulse_failed = !ok;
+	pulse_flushing = FALSE;
+	pa_threaded_mainloop_unlock(pulse_loop);
 }
 
 void pulse_pause(short paused)
 {
-	int err = 0;
-	pulse_paused = paused ? TRUE : FALSE;
-	if (pulse_paused && pulse_conn)
-		pa_simple_flush(pulse_conn, &err);
+	pa_operation *op;
+	if (!pulse_loop)
+		return;
+	pa_threaded_mainloop_lock(pulse_loop);
+	if (pulse_ready() && pulse_paused != !!paused)
+	{
+		pulse_output_time_locked();
+		pulse_paused = !!paused;
+		if (pulse_paused)
+			pulse_cancel_drain();
+		op = pa_stream_cork(pulse_stream, pulse_paused, pulse_stream_success, NULL);
+		if (op)
+			pa_operation_unref(op);
+		else
+			pulse_failed = TRUE;
+	}
+	pa_threaded_mainloop_unlock(pulse_loop);
 }
 
 int pulse_free(void)
 {
-	if (!pulse_conn || pulse_paused)
-		return 0;
-	return 262144;
+	gint available = 0;
+	size_t size;
+	if (!pulse_loop)
+		return G_MAXINT;
+	pa_threaded_mainloop_lock(pulse_loop);
+	if (!pulse_ready())
+		available = G_MAXINT; /* Let the decoder unwind; output_time reports the error. */
+	else if (!pulse_paused && !pulse_flushing)
+	{
+		size = pa_stream_writable_size(pulse_stream);
+		if (size == (size_t) -1)
+			pulse_failed = TRUE;
+		else if (size > 0)
+		{
+			const pa_buffer_attr *attr = pa_stream_get_buffer_attr(pulse_stream);
+			/* Decoders poll for a whole block, which can exceed tlength at
+			 * low sample rates. Allow that block within the hard buffer limit. */
+			if (attr && attr->maxlength > attr->tlength)
+				size = MIN((guint64) attr->maxlength,
+					(guint64) size + attr->maxlength - attr->tlength);
+			available = MIN(size, G_MAXINT);
+		}
+	}
+	pa_threaded_mainloop_unlock(pulse_loop);
+	return available;
+}
+
+static void pulse_drain_done(pa_stream *stream, int success, void *data)
+{
+	if (stream == pulse_stream)
+	{
+		pulse_drained = !!success;
+		pulse_failed = !success;
+		if (success)
+			pulse_last_time = pulse_written_time_locked();
+	}
 }
 
 int pulse_playing(void)
 {
-	return (pulse_conn && !pulse_paused) ? TRUE : FALSE;
+	gboolean playing = FALSE;
+	if (!pulse_loop)
+		return FALSE;
+	pa_threaded_mainloop_lock(pulse_loop);
+	if (pulse_ready() && !pulse_flushing && !pulse_drained)
+	{
+		playing = TRUE;
+		if (!pulse_paused && !pulse_drain)
+		{
+			pulse_drain = pa_stream_drain(pulse_stream, pulse_drain_done, NULL);
+			if (!pulse_drain)
+			{
+				pulse_failed = TRUE;
+				playing = FALSE;
+			}
+		}
+	}
+	pa_threaded_mainloop_unlock(pulse_loop);
+	return playing;
 }
 
 int pulse_get_written_time(void)
 {
-	if (!pulse_conn)
+	gint time = 0;
+	if (!pulse_loop)
 		return 0;
-	return (gint) ((pulse_written_bytes * 1000ULL) / (guint64) pulse_bps);
+	pa_threaded_mainloop_lock(pulse_loop);
+	if (pulse_stream)
+		time = pulse_written_time_locked();
+	pa_threaded_mainloop_unlock(pulse_loop);
+	return time;
 }
 
 int pulse_get_output_time(void)
 {
-	gint out;
-	if (!pulse_conn)
+	gint time = 0;
+	if (!pulse_loop)
 		return 0;
-
-	out = pulse_get_written_time();
-	if (!pulse_paused)
-	{
-		const gint64 now = g_get_monotonic_time();
-		const gint64 latency_ttl_us = 100 * 1000; /* 100ms */
-		if (pulse_cached_latency_at == 0 ||
-		    now < pulse_cached_latency_at ||
-		    (now - pulse_cached_latency_at) >= latency_ttl_us)
-		{
-			int err = 0;
-			pa_usec_t latency = pa_simple_get_latency(pulse_conn, &err);
-			if (latency != (pa_usec_t) -1)
-				pulse_cached_latency_ms = (gint) (latency / 1000);
-			pulse_cached_latency_at = now;
-		}
-		out = MAX(0, out - pulse_cached_latency_ms);
-	}
-	return (gint) pulse_output_time_offset + out;
+	pa_threaded_mainloop_lock(pulse_loop);
+	if (pulse_opening)
+		time = 0;
+	else if (pulse_failed || (pulse_stream && !pulse_ready()))
+		time = -2;
+	else if (pulse_stream)
+		time = pulse_output_time_locked();
+	pa_threaded_mainloop_unlock(pulse_loop);
+	return time;
 }
 
-void pulse_get_volume(int *l, int *r)
+void pulse_get_volume(int *left, int *right)
 {
-	gint sys = -1;
-
-	if (pulse_get_system_volume_cached(&sys))
+	gint base;
+	if (!pulse_loop)
 	{
-		if (pulse_hw_volume > 0)
-		{
-			if (l)
-				*l = CLAMP((sys * pulse_soft_gain_left + 50) / 100, 0, 100);
-			if (r)
-				*r = CLAMP((sys * pulse_soft_gain_right + 50) / 100, 0, 100);
-			return;
-		}
-		if (l)
-			*l = sys;
-		if (r)
-			*r = sys;
+		if (left) *left = pulse_cfg.volume_left;
+		if (right) *right = pulse_cfg.volume_right;
 		return;
 	}
-
-	if (l)
-		*l = CLAMP(pulse_cfg.volume_left, 0, 100);
-	if (r)
-		*r = CLAMP(pulse_cfg.volume_right, 0, 100);
-}
-
-void pulse_set_volume(int l, int r)
-{
-	pulse_update_software_gains(l, r);
-
-	if (!pulse_set_system_volume(pulse_hw_volume))
+	pa_threaded_mainloop_lock(pulse_loop);
+	base = pulse_pending_volume >= 0 ? pulse_pending_volume : pulse_system_volume;
+	if (base >= 0 && !pulse_software_volume)
 	{
-		/* Fall back to pure software volume when Pulse sink volume cannot be set. */
-		pulse_hw_volume = 100;
-		pulse_soft_gain_left = CLAMP(pulse_cfg.volume_left, 0, 100);
-		pulse_soft_gain_right = CLAMP(pulse_cfg.volume_right, 0, 100);
+		if (left) *left = (base * pulse_balance_left + 50) / 100;
+		if (right) *right = (base * pulse_balance_right + 50) / 100;
 	}
 	else
 	{
-		pulse_cached_system_volume = pulse_hw_volume;
-		pulse_cached_system_volume_at = g_get_monotonic_time();
+		if (left) *left = pulse_requested_left;
+		if (right) *right = pulse_requested_right;
 	}
+	pa_threaded_mainloop_unlock(pulse_loop);
+}
 
-	pulse_save_config();
+void pulse_set_volume(int left, int right)
+{
+	gint base;
+	left = CLAMP(left, 0, 100);
+	right = CLAMP(right, 0, 100);
+	if (pulse_loop)
+	{
+		pa_threaded_mainloop_lock(pulse_loop);
+		base = MAX(left, right);
+		pulse_requested_left = left;
+		pulse_requested_right = right;
+		pulse_balance_left = base ? (left * 100 + base / 2) / base : 100;
+		pulse_balance_right = base ? (right * 100 + base / 2) / base : 100;
+		pulse_pending_volume = base;
+		pulse_software_volume = pulse_system_volume < 0;
+		pulse_update_gains();
+		pulse_apply_pending_volume();
+		pa_threaded_mainloop_unlock(pulse_loop);
+	}
+	pulse_cfg.volume_left = left;
+	pulse_cfg.volume_right = right;
+	if (pulse_save_source)
+		g_source_remove(pulse_save_source);
+	pulse_save_source = g_timeout_add(500, pulse_save_later, NULL);
 }

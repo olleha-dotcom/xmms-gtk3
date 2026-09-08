@@ -1,36 +1,40 @@
 # GTK3 Porting Status
 
-This tree has started a GTK3 migration with compatibility shims and low-risk API updates.
+The GTK3 port is functional and retains the classic skin and plugin interfaces.
+Build and installation instructions are in README. VERSION is the upstream
+version source; ChangeLog records maintenance changes.
 
-## Completed in this change set
+## Current Architecture
 
-- Added `gtk_compat.h` with GTK3 shims for legacy signal/object/timer/size APIs.
-- Replaced direct `#include <gtk/gtk.h>` includes in source headers and C files with `#include "gtk_compat.h"`.
-- Replaced legacy timer calls:
-  - `gtk_timeout_add` -> `g_timeout_add`
-  - `gtk_timeout_remove` -> `g_source_remove`
-- Replaced legacy sizing and border calls:
-  - `gtk_widget_set_usize` -> `gtk_widget_set_size_request`
-  - `gtk_container_border_width` -> `gtk_container_set_border_width`
-- Updated `configure.in` dependency checks to `pkg-config` with `glib-2.0`, `gthread-2.0`, and `gtk+-3.0`.
+- `gtk_compat.h` is the public umbrella for focused compatibility headers in
+  `gtk_compat/`: types, signals, widgets, drawing, menus and Cairo helpers.
+- Legacy lists and menus are backed by GTK3 widgets; file selection uses GTK3
+  file chooser dialogs. Compatibility names remain for existing plugin sources.
+- Main, equalizer and playlist windows render their skin surfaces through GTK3
+  draw handlers. Cairo handles doublesize scaling with nearest-neighbor sampling;
+  no extra doubled skin buffers are needed.
+- `xmms/ui_scale.h` defines the shared logical-coordinate/skin-coordinate mapping.
+  GDK monitor scaling and XMMS doublesize are distinct. Root drag coordinates must
+  not be rescaled as skin coordinates. Playlist layout has its own sizing model.
+- PulseAudio uses a persistent threaded context. GUI volume reads use cached
+  subscription state; decoder setup and seek waits have finite deadlines.
+- Decoder EOF is authoritative. `xmms/playback.h` provides a last-resort watchdog
+  only for an unpaused position that stops advancing near a known track end.
 
-## Major blockers remaining
+## Regression Checks
 
-These APIs/widgets are removed in GTK3 and still need targeted rewrites:
+Run `make check` and `make check-sanitizers` after a configured build. Tests cover
+malformed BMP data, configuration write failures, Cairo scaling, playback/resume
+policy and isolated PulseAudio stream operations. GUI tests use a private Xvfb
+server, not the user's display. See README for dependencies and skipped tests.
 
-- `GtkItemFactory` menu construction paths
-- `GtkCList` usage in playlist/equalizer related windows
-- `GtkCombo` and related direct struct field access
-- `GtkFileSelection` dialogs
-- GDK drawing and pixmap/font APIs:
-  - `GdkPixmap`, `gdk_draw_pixmap`, `gdk_font_*`, `gdk_text_width*`
-- `gtk_type_*` object/type APIs in `libxmms/xentry.c`
-- Legacy `GtkObject` data APIs where behavior differs under `GObject`
+## Remaining Migration Work
 
-## Next recommended implementation batch
-
-1. Replace `GtkItemFactory` with `GtkMenu`/`GtkAction` (or a custom menu builder).
-2. Port `GtkFileSelection` call sites to `GtkFileChooserDialog`.
-3. Port `GtkCombo` + `GtkCList` call sites to `GtkComboBoxText`/`GtkTreeView`.
-4. Move custom drawing to Cairo/Pango on `GtkDrawingArea`.
-5. Port custom `xentry` type to `G_DEFINE_TYPE`.
+The compatibility layer is deliberately not a claim that every legacy API has
+been eliminated. Plugins still use drawing/font adapters and deprecated GTK3
+widgets. Replace those incrementally, with tests, rather than changing the
+public plugin ABI wholesale. Native Wayland window placement and decorations
+also need compositor-specific manual testing; Xvfb only verifies X11 behavior.
+Legacy decoder open/seek entry points can still run synchronously from GUI
+callbacks. PulseAudio waits are bounded, but making every decoder operation
+asynchronous requires a separate input-plugin lifecycle change.

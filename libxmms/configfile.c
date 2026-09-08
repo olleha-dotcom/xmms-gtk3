@@ -22,6 +22,9 @@
 #endif
 
 #include <sys/stat.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <glib/gstdio.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <string.h>
@@ -43,39 +46,68 @@ ConfigFile *xmms_cfg_new(void)
 	return cfg;
 }
 
+static gchar *xmms_cfg_read_file(gchar *filename)
+{
+	int fd, saved_errno;
+	struct stat stats;
+	FILE *file = NULL;
+	GString *buffer = NULL;
+	gchar chunk[4096];
+	gsize count;
+
+	/* Follow regular-file symlinks, but never block opening a FIFO. Read to
+	 * EOF from this descriptor instead of sizing a buffer from a path stat.
+	 */
+	fd = g_open(filename, O_RDONLY | O_NONBLOCK, 0);
+	if (fd == -1 || fstat(fd, &stats) != 0)
+		goto failure;
+	if (!S_ISREG(stats.st_mode))
+	{
+		errno = EINVAL;
+		goto failure;
+	}
+	file = fdopen(fd, "r");
+	if (!file)
+		goto failure;
+	fd = -1;
+	buffer = g_string_new(NULL);
+	while ((count = fread(chunk, 1, sizeof(chunk), file)) != 0)
+		g_string_append_len(buffer, chunk, count);
+	if (ferror(file))
+		goto failure;
+	if (fclose(file) != 0)
+	{
+		file = NULL;
+		goto failure;
+	}
+	return g_string_free(buffer, FALSE);
+
+ failure:
+	saved_errno = errno;
+	if (file)
+		fclose(file);
+	if (fd != -1)
+		close(fd);
+	if (buffer)
+		g_string_free(buffer, TRUE);
+	g_warning("xmms_cfg_open_file: failed to read '%s': %s", filename,
+		  g_strerror(saved_errno ? saved_errno : EIO));
+	return NULL;
+}
+
 ConfigFile *xmms_cfg_open_file(gchar * filename)
 {
 	ConfigFile *cfg;
 
-	FILE *file;
 	char *buffer, **lines, *tmp;
 	int i;
-	struct stat stats;
 	ConfigSection *section = NULL;
 
 	g_return_val_if_fail(filename != NULL, NULL);
 
-	if (lstat(filename, &stats) == -1)
-	{
-		g_warning("xmms_cfg_open_file: failed to stat '%s': %s", filename, g_strerror(errno));
+	buffer = xmms_cfg_read_file(filename);
+	if (!buffer)
 		return NULL;
-	}
-	if (!(file = fopen(filename, "r")))
-	{
-		g_warning("xmms_cfg_open_file: failed to open '%s': %s", filename, g_strerror(errno));
-		return NULL;
-	}
-
-	buffer = g_malloc(stats.st_size + 1);
-	if (fread(buffer, 1, stats.st_size, file) != (size_t)stats.st_size)
-	{
-		g_warning("xmms_cfg_open_file: failed to read '%s'", filename);
-		g_free(buffer);
-		fclose(file);
-		return NULL;
-	}
-	fclose(file);
-	buffer[stats.st_size] = '\0';
 
 	cfg = g_malloc0(sizeof (ConfigFile));
 	lines = g_strsplit(buffer, "\n", 0);
@@ -126,7 +158,13 @@ ConfigFile * xmms_cfg_open_default_file(void)
 
 gboolean xmms_cfg_write_file(ConfigFile * cfg, gchar * filename)
 {
-	FILE *file;
+	FILE *file = NULL;
+	gchar *directory, *temporary;
+	struct stat stats;
+	mode_t mode = 0600;
+	int fd = -1, saved_errno;
+	gboolean success = FALSE;
+	gboolean temporary_created = FALSE;
 	GList *section_list, *line_list;
 	ConfigSection *section;
 	ConfigLine *line;
@@ -134,11 +172,33 @@ gboolean xmms_cfg_write_file(ConfigFile * cfg, gchar * filename)
 	g_return_val_if_fail(cfg != NULL, FALSE);
 	g_return_val_if_fail(filename != NULL, FALSE);
 
-	if (!(file = fopen(filename, "w")))
+	/* Never follow a link or replace a device/FIFO with a config file. */
+	if (g_lstat(filename, &stats) == 0)
 	{
-		g_warning("xmms_cfg_write_file: failed to open '%s' for writing: %s", filename, g_strerror(errno));
+		if (!S_ISREG(stats.st_mode))
+		{
+			g_warning("xmms_cfg_write_file: refusing non-regular file '%s'", filename);
+			return FALSE;
+		}
+		mode = stats.st_mode & 0777;
+	}
+	else if (errno != ENOENT)
+	{
+		g_warning("xmms_cfg_write_file: failed to stat '%s': %s", filename, g_strerror(errno));
 		return FALSE;
 	}
+
+	directory = g_path_get_dirname(filename);
+	temporary = g_build_filename(directory, ".xmms-config-XXXXXX", NULL);
+	g_free(directory);
+	fd = g_mkstemp(temporary);
+	if (fd == -1)
+		goto out;
+	temporary_created = TRUE;
+	file = fdopen(fd, "w");
+	if (!file)
+		goto out;
+	fd = -1; /* Owned by the stream from here on. */
 
 	section_list = cfg->sections;
 	while (section_list)
@@ -146,20 +206,50 @@ gboolean xmms_cfg_write_file(ConfigFile * cfg, gchar * filename)
 		section = (ConfigSection *) section_list->data;
 		if (section->lines)
 		{
-			fprintf(file, "[%s]\n", section->name);
+			if (fprintf(file, "[%s]\n", section->name) < 0)
+				goto out;
 			line_list = section->lines;
 			while (line_list)
 			{
 				line = (ConfigLine *) line_list->data;
-				fprintf(file, "%s=%s\n", line->key, line->value);
+				if (fprintf(file, "%s=%s\n", line->key, line->value) < 0)
+					goto out;
 				line_list = g_list_next(line_list);
 			}
-			fprintf(file, "\n");
+			if (fprintf(file, "\n") < 0)
+				goto out;
 		}
 		section_list = g_list_next(section_list);
 	}
-	fclose(file);
-	return TRUE;
+	if (fflush(file) != 0 || ferror(file) ||
+	    fchmod(fileno(file), mode) != 0 || fsync(fileno(file)) != 0)
+		goto out;
+	if (fclose(file) != 0)
+	{
+		file = NULL;
+		goto out;
+	}
+	file = NULL;
+	/* This is the commit point; no failure before it touches the old file. */
+	if (g_rename(temporary, filename) != 0)
+		goto out;
+	success = TRUE;
+
+ out:
+	saved_errno = errno;
+	if (file)
+		fclose(file);
+	if (fd != -1)
+		close(fd);
+	if (!success)
+	{
+		if (temporary_created)
+			g_unlink(temporary);
+		g_warning("xmms_cfg_write_file: failed to save '%s': %s", filename,
+			  g_strerror(saved_errno ? saved_errno : EIO));
+	}
+	g_free(temporary);
+	return success;
 }
 
 gboolean xmms_cfg_write_default_file(ConfigFile * cfg)

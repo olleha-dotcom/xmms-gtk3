@@ -1,11 +1,15 @@
 dnl Process this file with autoconf to produce a configure script.
-AC_INIT([xmms/main.c])
+AC_INIT([xmms], m4_normalize(m4_esyscmd([cat VERSION])))
+AC_CONFIG_SRCDIR([xmms/main.c])
 AC_CANONICAL_HOST
 
 cflags_set=${CFLAGS+set}
 AC_CONFIG_HEADERS([config.h xmms/i18n.h])
 
-AM_INIT_AUTOMAKE([xmms], [1.5.3])
+AM_INIT_AUTOMAKE([foreign])
+
+PKG_CHECK_MODULES([TEST_X11], [x11 xtst], [have_gui_tests=yes], [have_gui_tests=no])
+AM_CONDITIONAL([HAVE_GUI_TESTS], [test "x$have_gui_tests" = "xyes"])
 
 AC_ARG_ENABLE([one-plugin-dir],
 [  --enable-one-plugin-dir  use a single plugin dir [default=no]],,
@@ -461,7 +465,7 @@ AC_ARG_ENABLE([pulse],
 	[enable_pulse=$enableval], [enable_pulse=yes])
 
 if test "x$enable_pulse" = "xyes"; then
-	PKG_CHECK_MODULES([PULSE], [libpulse-simple >= 12],
+	PKG_CHECK_MODULES([PULSE], [libpulse >= 12],
 			  [have_pulse=yes], [have_pulse=no])
 else
 	AC_MSG_RESULT([*** PulseAudio plugin disabled per user request ***])
@@ -671,6 +675,7 @@ xmms.spec
 xmms-config
 xmms/Makefile
 xmms/defskin/Makefile
+tests/Makefile
 Output/Makefile
 Output/OSS/Makefile
 Output/esd/Makefile

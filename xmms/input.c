@@ -36,6 +36,12 @@ struct vis_node
 
 struct InputPluginData *ip_data;
 static GList *vis_list = NULL;
+static gint playback_generation;
+
+guint input_get_generation(void)
+{
+	return (guint) g_atomic_int_get(&playback_generation);
+}
 
 gchar *input_info_text = NULL;
 extern PlayStatus *mainwin_playstatus;
@@ -246,6 +252,7 @@ void input_play(char *filename)
 	GList *node;
 	InputPlugin *ip;
 
+	g_atomic_int_inc(&playback_generation);
 	node = get_input_list();
 	if (get_current_output_plugin() == NULL)
 	{
@@ -281,6 +288,7 @@ void input_seek(int time)
 {
 	if (ip_data->playing && get_current_input_plugin())
 	{
+		g_atomic_int_inc(&playback_generation);
 		free_vis_data();
 		get_current_input_plugin()->seek(time);
 	}
@@ -288,6 +296,7 @@ void input_seek(int time)
 
 void input_stop(void)
 {
+	g_atomic_int_inc(&playback_generation);
 	if (ip_data->playing && get_current_input_plugin())
 	{
 		ip_data->playing = FALSE;

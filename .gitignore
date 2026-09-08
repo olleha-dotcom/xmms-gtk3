@@ -25,6 +25,7 @@ ltmain.sh
 # Packaging/build output
 .pkgbuild/
 *.deb
+/xmms-*.tar.gz
 
 # Core/debug/runtime temp
 core
@@ -39,3 +40,15 @@ vgcore.*
 
 #Skin filer
 *.wsz
+
+# Regression test build products
+test-driver
+tests/Makefile
+tests/test_bmp
+tests/test_config
+tests/test_ui_scale
+tests/test_playback
+tests/test_pulse
+tests/test_gui
+tests/*.log
+tests/*.trs

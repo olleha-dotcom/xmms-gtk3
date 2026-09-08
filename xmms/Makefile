@@ -358,8 +358,8 @@ NM = /usr/bin/nm -B
 NMEDIT = 
 OBJDUMP = objdump
 OBJEXT = o
-OGG_CFLAGS = -I/usr/local/include
-OGG_LIBS = -L/usr/local/lib -logg
+OGG_CFLAGS = -I/usr/include
+OGG_LIBS = -L/usr/lib -logg
 OPENGL_LIBS = -lGL
 OTOOL = 
 OTOOL64 = 
@@ -367,11 +367,11 @@ OUTPUT_PLUGINS = $(ALL_PLUGINS)
 OUTPUT_PLUGIN_DIR = Output
 PACKAGE = xmms
 PACKAGE_BUGREPORT = 
-PACKAGE_NAME = 
-PACKAGE_STRING = 
-PACKAGE_TARNAME = 
+PACKAGE_NAME = xmms
+PACKAGE_STRING = xmms 1.5.3
+PACKAGE_TARNAME = xmms
 PACKAGE_URL = 
-PACKAGE_VERSION = 
+PACKAGE_VERSION = 1.5.3
 PATH_SEPARATOR = :
 PKG_CONFIG = /usr/bin/pkg-config
 PKG_CONFIG_LIBDIR = 
@@ -381,13 +381,15 @@ POSIX_LIBS =
 POSUB = 
 PTHREAD_LIBS = -lpthread
 PULSE_CFLAGS = -D_REENTRANT 
-PULSE_LIBS = -lpulse-simple -lpulse -pthread 
+PULSE_LIBS = -lpulse -pthread
 RANLIB = ranlib
 SED = /usr/bin/sed
 SET_MAKE = 
 SHELL = /bin/bash
 SM_LIBS = -lSM -lICE
 STRIP = strip
+TEST_X11_CFLAGS =
+TEST_X11_LIBS = -lX11 -lXtst
 USE_INCLUDED_LIBINTL = no
 USE_IPV6 = 
 USE_NLS = no
@@ -397,10 +399,10 @@ VISUALIZATION_PLUGIN_DIR = Visualization
 VM_LIBS = 
 VORBISENC_LIBS = -lvorbisenc
 VORBISFILE_LIBS = -lvorbisfile
-VORBIS_CFLAGS = -I/usr/local/include
-VORBIS_LIBS = -L/usr/local/lib -lvorbis -lm
+VORBIS_CFLAGS = -I/usr/include
+VORBIS_LIBS = -L/usr/lib -lvorbis -lm
 XMKMF = 
-XMMS_DEFINES = -g -O2 -Wall -Wpointer-arith -finline-functions -ffast-math -funroll-all-loops -DDATA_DIR=\"${datarootdir}/xmms\" -DPLUGIN_DIR=\"${exec_prefix}/lib/xmms\" -DPLUGINSUBS=\"Output\",\"Input\",\"Effect\",\"General\",\"Visualization\" -DLOCALEDIR=\"${datarootdir}/locale\"
+XMMS_DEFINES = -g -O2 -Wall -Wpointer-arith -finline-functions -ffast-math -funroll-all-loops -DDATA_DIR=\"${datarootdir}/xmms\" -DPLUGIN_DIR=\"/usr/lib/x86_64-linux-gnu/xmms\" -DPLUGINSUBS=\"Output\",\"Input\",\"Effect\",\"General\",\"Visualization\" -DLOCALEDIR=\"${datarootdir}/locale\"
 XMMS_PATH = /usr/local/bin/xmms
 Z_LIBS = -lz
 abs_builddir = /home/olle/work/xmms-gtk3/xmms
@@ -410,7 +412,7 @@ abs_top_srcdir = /home/olle/work/xmms-gtk3
 ac_ct_AR = ar
 ac_ct_CC = gcc
 ac_ct_DUMPBIN = 
-ac_prefix_program = /usr/local/bin/xmms
+ac_prefix_program =
 am__include = include
 am__leading_dot = .
 am__quote = 
@@ -425,7 +427,7 @@ build_vendor = pc
 builddir = .
 datadir = ${datarootdir}
 datarootdir = ${prefix}/share
-docdir = ${datarootdir}/doc/${PACKAGE}
+docdir = ${datarootdir}/doc/${PACKAGE_TARNAME}
 dvidir = ${docdir}
 exec_prefix = ${prefix}
 host = x86_64-pc-linux-gnu
@@ -437,7 +439,7 @@ htmldir = ${docdir}
 includedir = ${prefix}/include
 infodir = ${datarootdir}/info
 install_sh = ${SHELL} /home/olle/work/xmms-gtk3/install-sh
-libdir = ${exec_prefix}/lib
+libdir = /usr/lib/x86_64-linux-gnu
 libexecdir = ${exec_prefix}/libexec
 localedir = ${datarootdir}/locale
 localstatedir = ${prefix}/var
@@ -445,9 +447,9 @@ mandir = ${datarootdir}/man
 mkdir_p = $(MKDIR_P)
 oldincludedir = /usr/include
 pdfdir = ${docdir}
-plugindir = ${exec_prefix}/lib/xmms
+plugindir = /usr/lib/x86_64-linux-gnu/xmms
 pluginsubs = \"Output\",\"Input\",\"Effect\",\"General\",\"Visualization\"
-prefix = /usr/local
+prefix = /usr
 program_transform_name = s,x,x,
 psdir = ${docdir}
 runstatedir = ${localstatedir}/run
@@ -467,7 +469,7 @@ xmms_LDFLAGS = -export-dynamic
 xmms_LDADD = -lgtk-3 -lgdk-3 -lz -lpangocairo-1.0 -lpango-1.0 -lharfbuzz -latk-1.0 -lcairo-gobject -lcairo -lgdk_pixbuf-2.0 -lgio-2.0 -lgobject-2.0 -lglib-2.0  -lpthread -lSM -lICE  -lm -lX11 \
  $(top_builddir)/libxmms/libxmms.la 
 
-INCLUDES = -I/usr/include/gtk-3.0 -I/usr/include/pango-1.0 -I/usr/include/glib-2.0 -I/usr/lib/x86_64-linux-gnu/glib-2.0/include -I/usr/include/harfbuzz -I/usr/include/freetype2 -I/usr/include/libpng16 -I/usr/include/libmount -I/usr/include/blkid -I/usr/include/fribidi -I/usr/include/cairo -I/usr/include/pixman-1 -I/usr/include/gdk-pixbuf-2.0 -I/usr/include/x86_64-linux-gnu -I/usr/include/webp -I/usr/include/gio-unix-2.0 -I/usr/include/atk-1.0 -I/usr/include/at-spi2-atk/2.0 -I/usr/include/at-spi-2.0 -I/usr/include/dbus-1.0 -I/usr/lib/x86_64-linux-gnu/dbus-1.0/include -pthread  -g -O2 -Wall -Wpointer-arith -finline-functions -ffast-math -funroll-all-loops -DDATA_DIR=\"${datarootdir}/xmms\" -DPLUGIN_DIR=\"${exec_prefix}/lib/xmms\" -DPLUGINSUBS=\"Output\",\"Input\",\"Effect\",\"General\",\"Visualization\" -DLOCALEDIR=\"${datarootdir}/locale\"  \
+INCLUDES = -I/usr/include/gtk-3.0 -I/usr/include/pango-1.0 -I/usr/include/glib-2.0 -I/usr/lib/x86_64-linux-gnu/glib-2.0/include -I/usr/include/harfbuzz -I/usr/include/freetype2 -I/usr/include/libpng16 -I/usr/include/libmount -I/usr/include/blkid -I/usr/include/fribidi -I/usr/include/cairo -I/usr/include/pixman-1 -I/usr/include/gdk-pixbuf-2.0 -I/usr/include/x86_64-linux-gnu -I/usr/include/webp -I/usr/include/gio-unix-2.0 -I/usr/include/atk-1.0 -I/usr/include/at-spi2-atk/2.0 -I/usr/include/at-spi-2.0 -I/usr/include/dbus-1.0 -I/usr/lib/x86_64-linux-gnu/dbus-1.0/include -pthread  -g -O2 -Wall -Wpointer-arith -finline-functions -ffast-math -funroll-all-loops -DDATA_DIR=\"${datarootdir}/xmms\" -DPLUGIN_DIR=\"/usr/lib/x86_64-linux-gnu/xmms\" -DPLUGINSUBS=\"Output\",\"Input\",\"Effect\",\"General\",\"Visualization\" -DLOCALEDIR=\"${datarootdir}/locale\"  \
 -I$(top_builddir)/intl -I$(top_srcdir)
 
 xmms_SOURCES = bmp.c bmp.h \
@@ -501,7 +503,7 @@ playlist_slider.c playlist_slider.h \
 playlist_popup.c playlist_popup.h \
 eq_graph.c eq_graph.h \
 eq_slider.c eq_slider.h \
-main.c main.h \
+main.c main.h playback.h \
 skinwin.c skinwin.h \
 prefswin.c prefswin.h \
 playlistwin.c playlistwin.h \
@@ -516,7 +518,7 @@ urldecode.c urldecode.h \
 dnd.h \
 mkdtemp.c
 
-EXTRA_DIST = xmms_logo.xpm xmms_mini.xpm xmms.desktop xmms.wmconfig
+EXTRA_DIST = xmms_logo.xpm xmms_mini.xpm xmms.desktop xmms.wmconfig xmms.png ui_scale.h
 xmmsinclude_HEADERS = plugin.h fullscreen.h
 all: i18n.h
 	$(MAKE) $(AM_MAKEFLAGS) all-recursive
@@ -532,9 +534,9 @@ $(srcdir)/Makefile.in:  $(srcdir)/Makefile.am  $(am__configure_deps)
 	      exit 1;; \
 	  esac; \
 	done; \
-	echo ' cd $(top_srcdir) && $(AUTOMAKE) --gnu xmms/Makefile'; \
+	echo ' cd $(top_srcdir) && $(AUTOMAKE) --foreign xmms/Makefile'; \
 	$(am__cd) $(top_srcdir) && \
-	  $(AUTOMAKE) --gnu xmms/Makefile
+	  $(AUTOMAKE) --foreign xmms/Makefile
 Makefile: $(srcdir)/Makefile.in $(top_builddir)/config.status
 	@case '$?' in \
 	  *config.status*) \

@@ -1,0 +1,49 @@
+name: Build, Test And Package
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GDK_BACKEND: x11
+      GDK_SCALE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential autoconf automake libtool pkg-config gettext \
+            dpkg-dev binutils libgtk-3-dev libglib2.0-dev libpulse-dev \
+            libasound2-dev libmikmod-dev libogg-dev libvorbis-dev zlib1g-dev \
+            libsm-dev libice-dev libx11-dev libxext-dev libxtst-dev libxxf86vm-dev libgl-dev \
+            pulseaudio pulseaudio-utils xvfb xauth desktop-file-utils unzip
+      - name: Regenerate and build from checkout
+        run: |
+          autoreconf --force --install
+          ./configure --prefix=/usr \
+            --libdir="/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)" \
+            --disable-esd --disable-oss
+          make -j"$(nproc)"
+      - name: Regression tests
+        run: make check
+      - name: Address and undefined behavior sanitizers
+        run: make check-sanitizers
+      - name: Build an isolated Debian package
+        run: OUT_DIR="$RUNNER_TEMP/packages" bash packaging/build-deb.sh
+      - name: Verify package metadata and payload
+        run: |
+          deb="$RUNNER_TEMP/packages/xmms-gtk3_$(cat VERSION)-2ubuntu24.04_$(dpkg --print-architecture).deb"
+          bash packaging/check-deb.sh "$deb"
+          sudo apt-get install -y "$deb"
+      - name: Test logs on failure
+        if: failure()
+        run: find tests -name '*.log' -type f -print -exec cat {} \;

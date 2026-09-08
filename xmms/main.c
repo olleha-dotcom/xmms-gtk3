@@ -18,6 +18,8 @@
  *  Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  */
 #include "xmms.h"
+#include "ui_scale.h"
+#include "playback.h"
 
 #include <gdk/gdkx.h>
 #include <gdk/gdk.h>
@@ -44,7 +46,7 @@ GtkWidget *mainwin, *mainwin_url_window = NULL, *mainwin_dir_browser = NULL;
 GtkWidget *mainwin_jtt = NULL, *mainwin_jtf = NULL, *mainwin_qm = NULL;
 GtkItemFactory *mainwin_options_menu, *mainwin_songname_menu, *mainwin_vis_menu;
 GtkItemFactory *mainwin_general_menu;
-GdkPixmap *mainwin_bg = NULL, *mainwin_bg_dblsize;
+GdkPixmap *mainwin_bg = NULL;
 GdkGC *mainwin_gc;
 
 GtkAccelGroup *mainwin_accel;
@@ -84,6 +86,7 @@ static gchar *mainwin_title_text = NULL;
 static gboolean mainwin_info_text_locked = FALSE;
 static gboolean startup_resume_seek_pending = FALSE;
 static gint startup_resume_seek_time = 0;
+static guint startup_resume_generation;
 
 /* For x11r5 session management */
 static char **restart_argv;
@@ -95,7 +98,7 @@ static gint balance;
 gboolean pposition_broken = FALSE;
 static pthread_mutex_t title_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static void log_track_end_state(const char *reason, gint time, gint length, gint stalled_ticks)
+static void log_track_end_state(const char *reason, gint time, gint length)
 {
 	gint elapsed_sec, remaining_ms, remaining_sec;
 
@@ -106,11 +109,11 @@ static void log_track_end_state(const char *reason, gint time, gint length, gint
 	remaining_ms = MAX(length - time, 0);
 	remaining_sec = (remaining_ms + 999) / 1000;
 
-	g_message("Track end monitor: %s, remaining=%d:%02d, elapsed=%d:%02d, raw_ms=%d/%d, stalled_ticks=%d",
+	g_message("Track end monitor: %s, remaining=%d:%02d, elapsed=%d:%02d, raw_ms=%d/%d",
 		  reason,
 		  remaining_sec / 60, remaining_sec % 60,
 		  elapsed_sec / 60, elapsed_sec % 60,
-		  time, length, stalled_ticks);
+		  time, length);
 }
 
 extern gchar *plugin_dir_list[];
@@ -140,16 +143,17 @@ void mainwin_motion(GtkWidget * widget, GdkEventMotion * event, gpointer callbac
 void mainwin_focus_in(GtkWidget * widget, GdkEvent * event, gpointer callback_data);
 void mainwin_focus_out(GtkWidget * widget, GdkEventButton * event, gpointer callback_data);
 
+static gint mainwin_scale(void)
+{
+	return xmms_ui_skin_scale(XMMS_UI_MAIN, cfg.doublesize,
+				  cfg.eq_doublesize_linked);
+}
+
 static gboolean mainwin_draw_cb(GtkWidget *widget, cairo_t *cr, gpointer data)
 {
-	cairo_surface_t *bg = cfg.doublesize ? mainwin_bg_dblsize : mainwin_bg;
 	(void) widget;
 	(void) data;
-	if (!bg || !cr)
-		return FALSE;
-	cairo_set_source_surface(cr, bg, 0, 0);
-	cairo_paint(cr);
-	return TRUE;
+	return xmms_cairo_paint_skin(cr, mainwin_bg, mainwin_scale());
 }
 
 static gboolean mainwin_button_press_event_cb(GtkWidget *widget, GdkEventButton *event, gpointer data)
@@ -168,36 +172,6 @@ static gboolean mainwin_motion_notify_event_cb(GtkWidget *widget, GdkEventMotion
 {
 	mainwin_motion(widget, event, data);
 	return TRUE;
-}
-
-static void mainwin_normalize_event_xy(gdouble *x, gdouble *y)
-{
-	GdkWindow *window;
-	gint width, height;
-	gint scale = 1;
-
-	if (!mainwin || !x || !y)
-		return;
-
-	window = gtk_widget_get_window(mainwin);
-	if (!window)
-		return;
-
-	width = gdk_window_get_width(window);
-	height = gdk_window_get_height(window);
-	scale = gdk_window_get_scale_factor(window);
-	if (scale < 1)
-		scale = 1;
-
-	/*
-	 * On some X11 + HiDPI setups event coordinates arrive in device pixels
-	 * while widget geometry uses logical pixels.
-	 */
-	if (scale > 1 && (*x >= width || *y >= height))
-	{
-		*x /= scale;
-		*y /= scale;
-	}
 }
 
 static gboolean mainwin_focus_in_event_cb(GtkWidget *widget, GdkEvent *event, gpointer data)
@@ -825,32 +799,15 @@ void set_doublesize(gboolean ds)
 	gint width;
 
 	cfg.doublesize = ds;
-
-	if (cfg.player_shaded)
-		height = 14;
-	else
-		height = 116;
-	width = cfg.doublesize ? 550 : 275;
+	width = xmms_ui_to_logical(mainwin_scale(), 275);
+	height = xmms_ui_to_logical(mainwin_scale(), cfg.player_shaded ? 14 : 116);
 
 	mainwin_set_shape_mask();
-	if (cfg.doublesize)
-	{
-		dock_resize(dock_window_list, mainwin, 550, height * 2);
-		gdk_window_set_back_pixmap(gtk_widget_get_window(mainwin), mainwin_bg_dblsize, 0);
-	}
-	else
-	{
-		dock_resize(dock_window_list, mainwin, 275, height);		
-		gdk_window_set_back_pixmap(gtk_widget_get_window(mainwin), mainwin_bg, 0);
-	}
+	dock_resize(dock_window_list, mainwin, width, height);
 
-	/* On some compositors the dock resize path may leave a stale larger surface.
-	 * Force the toplevel size to the exact target after toggling doublesize. */
-	gtk_widget_set_size_request(mainwin, width, height * (cfg.doublesize ? 2 : 1));
-	gtk_window_resize(GTK_WINDOW(mainwin), width, height * (cfg.doublesize ? 2 : 1));
-
-	if (gtk_widget_get_window(mainwin))
-		gdk_window_clear(gtk_widget_get_window(mainwin));
+	/* Keep toplevel geometry in GTK logical units, not device pixels. */
+	gtk_widget_set_size_request(mainwin, width, height);
+	gtk_window_resize(GTK_WINDOW(mainwin), width, height);
 	draw_main_window(TRUE);
 	vis_set_doublesize(mainwin_vis, ds);
 
@@ -873,7 +830,7 @@ void mainwin_set_shade_menu_cb(gboolean shaded)
 	mainwin_set_shape_mask();
 	if (shaded)
 	{
-		dock_shade(dock_window_list, mainwin, 14 * (cfg.doublesize + 1));
+		dock_shade(dock_window_list, mainwin, xmms_ui_to_logical(mainwin_scale(), 14));
 
 		show_widget(mainwin_svis);
 		vis_clear_data(mainwin_vis);
@@ -896,7 +853,7 @@ void mainwin_set_shade_menu_cb(gboolean shaded)
 	}
 	else
 	{
-		dock_shade(dock_window_list, mainwin, 116 * (cfg.doublesize + 1));
+		dock_shade(dock_window_list, mainwin, xmms_ui_to_logical(mainwin_scale(), 116));
 
 		hide_widget(mainwin_svis);
 		svis_clear_data(mainwin_svis);
@@ -992,8 +949,8 @@ void mainwin_menubtn_cb(void)
 {
 	gint x, y;
 	dock_get_widget_pos(mainwin, &x, &y);
-	util_item_factory_popup(mainwin_general_menu, x + 6 * (1 + cfg.doublesize),
-				y + 14 * (1 + cfg.doublesize), 1, GDK_CURRENT_TIME);
+	util_item_factory_popup(mainwin_general_menu, x + xmms_ui_to_logical(mainwin_scale(), 6),
+				y + xmms_ui_to_logical(mainwin_scale(), 14), 1, GDK_CURRENT_TIME);
 }
 
 void mainwin_minimize_cb(void)
@@ -1050,14 +1007,13 @@ void draw_mainwin_titlebar(int focus)
 static void mainwin_ensure_geometry(void)
 {
 	gint width, height;
-	gint expected_w = cfg.doublesize ? 550 : 275;
+	gint expected_w = xmms_ui_to_logical(mainwin_scale(), 275);
 	gint expected_h;
 
 	if (!mainwin || !gtk_widget_get_window(mainwin))
 		return;
 
-	expected_h = cfg.player_shaded ? (cfg.doublesize ? 28 : 14) :
-		(cfg.doublesize ? 232 : 116);
+	expected_h = xmms_ui_to_logical(mainwin_scale(), cfg.player_shaded ? 14 : 116);
 
 	gdk_window_get_size(gtk_widget_get_window(mainwin), &width, &height);
 	if (width != expected_w || height != expected_h)
@@ -1066,9 +1022,6 @@ static void mainwin_ensure_geometry(void)
 
 void draw_main_window(gboolean force)
 {
-	GdkImage *img, *img2;
-	GList *wl;
-	Widget *w;
 	gboolean redraw;
 
 	if (!cfg.player_visible)
@@ -1087,46 +1040,7 @@ void draw_main_window(gboolean force)
 
 	if (redraw || force)
 	{
-
-		if (force)
-		{
-			if (cfg.doublesize)
-			{
-				img = gdk_image_get(mainwin_bg, 0, 0, 275, cfg.player_shaded ? 14 : 116);
-				img2 = create_dblsize_image(img);
-				gdk_draw_image(mainwin_bg_dblsize, mainwin_gc, img2, 0, 0, 0, 0, 550, cfg.player_shaded ? 28 : 232);
-				gdk_image_destroy(img2);
-				gdk_image_destroy(img);
-			}
-		}
-		else
-		{
-			wl = mainwin_wlist;
-			while (wl)
-			{
-				w = (Widget *) wl->data;
-				if (w->redraw && w->visible)
-				{
-					if (cfg.doublesize)
-					{
-						img = gdk_image_get(mainwin_bg, w->x, w->y, w->width, w->height);
-						img2 = create_dblsize_image(img);
-						gdk_draw_image(mainwin_bg_dblsize, mainwin_gc, img2, 0, 0, w->x << 1, w->y << 1, w->width << 1, w->height << 1);
-						gdk_image_destroy(img2);
-						gdk_image_destroy(img);
-						gdk_window_clear_area(gtk_widget_get_window(mainwin), w->x << 1, w->y << 1, w->width << 1, w->height << 1);
-					}
-					else
-						gdk_window_clear_area(gtk_widget_get_window(mainwin), w->x, w->y, w->width, w->height);
-					w->redraw = FALSE;
-
-				}
-				wl = wl->next;
-			}
-		}
-		if (force)
-			gdk_window_clear(gtk_widget_get_window(mainwin));
-		gdk_flush();
+		clear_widget_list_redraw(mainwin_wlist);
 		gtk_widget_queue_draw(mainwin);
 	}
 	unlock_widget_list(mainwin_wlist);
@@ -1298,7 +1212,11 @@ void mainwin_disable_seekbar(void)
 
 void mainwin_release(GtkWidget * widget, GdkEventButton * event, gpointer callback_data)
 {
-	mainwin_normalize_event_xy(&event->x, &event->y);
+	GdkEventButton skin_event = *event;
+
+	xmms_ui_to_skin_xy(mainwin_scale(), event->x, event->y,
+			   &skin_event.x, &skin_event.y);
+	event = &skin_event;
 
 	gdk_pointer_ungrab(GDK_CURRENT_TIME);
 
@@ -1314,11 +1232,6 @@ void mainwin_release(GtkWidget * widget, GdkEventButton * event, gpointer callba
 	{
 		dock_move_release(mainwin);
 	}
-	if (mainwin_menurow->mr_doublesize_selected)
-	{
-		event->x /= 2;
-		event->y /= 2;
-	}
 	handle_release_cb(mainwin_wlist, widget, event);
 
 	draw_main_window(FALSE);
@@ -1327,12 +1240,11 @@ void mainwin_release(GtkWidget * widget, GdkEventButton * event, gpointer callba
 
 void mainwin_motion(GtkWidget * widget, GdkEventMotion * event, gpointer callback_data)
 {
-	mainwin_normalize_event_xy(&event->x, &event->y);
-	if (cfg.doublesize)
-	{
-		event->x /= 2;
-		event->y /= 2;
-	}
+	GdkEventMotion skin_event = *event;
+
+	xmms_ui_to_skin_xy(mainwin_scale(), event->x, event->y,
+			   &skin_event.x, &skin_event.y);
+	event = &skin_event;
 	if (dock_is_moving(mainwin))
 	{
 		dock_move_motion(mainwin, event);
@@ -1375,18 +1287,12 @@ void mainwin_press(GtkWidget * widget, GdkEventButton * event, gpointer callback
 {
 	gboolean grab = TRUE;
 
-	mainwin_normalize_event_xy(&event->x, &event->y);
+	GdkEventButton skin_event = *event;
 
-	if (cfg.doublesize)
-	{
-		/*
-		 * A hack to make doublesize transparent to callbacks.
-		 * We should make a copy of this data instead of
-		 * tampering with the data we get from gtk+
-		 */
-		event->x /= 2;
-		event->y /= 2;
-	}
+	xmms_ui_to_skin_xy(mainwin_scale(), event->x, event->y,
+			   &skin_event.x, &skin_event.y);
+	event = &skin_event;
+
 
 	if ((event->button == 4 || event->button == 5) &&
 	    event->type == GDK_BUTTON_PRESS)
@@ -2546,11 +2452,7 @@ static gboolean mainwin_configure(GtkWidget * window, GdkEventConfigure *event, 
 
 void mainwin_set_back_pixmap(void)
 {
-	if (cfg.doublesize)
-		gdk_window_set_back_pixmap(gtk_widget_get_window(mainwin), mainwin_bg_dblsize, 0);
-	else
-		gdk_window_set_back_pixmap(gtk_widget_get_window(mainwin), mainwin_bg, 0);
-	gdk_window_clear(gtk_widget_get_window(mainwin));
+	gtk_widget_queue_draw(mainwin);
 }
 
 gint mainwin_client_event(GtkWidget *w,GdkEventClient *event, gpointer data)
@@ -3671,10 +3573,9 @@ static void mainwin_create_gtk(void)
 	mainwin_set_icon(mainwin);
 	util_set_cursor(mainwin);
 	
-	if (cfg.doublesize)
-		gtk_widget_set_size_request(mainwin, 550, cfg.player_shaded ? 28 : 232);
-	else
-		gtk_widget_set_size_request(mainwin, 275, cfg.player_shaded ? 14 : 116);
+	gtk_widget_set_size_request(mainwin,
+		xmms_ui_to_logical(mainwin_scale(), 275),
+		xmms_ui_to_logical(mainwin_scale(), cfg.player_shaded ? 14 : 116));
 	if (!cfg.show_wm_decorations)
 		gdk_window_set_decorations(gtk_widget_get_window(mainwin), 0);
 	gtk_window_add_accel_group(GTK_WINDOW(mainwin), mainwin_accel);
@@ -3708,7 +3609,6 @@ static void mainwin_create_gtk(void)
 void mainwin_create(void)
 {
 	mainwin_bg = gdk_pixmap_new(NULL, 275, 116, 24);
-	mainwin_bg_dblsize = gdk_pixmap_new(NULL, 550, 232, 24);
 	mainwin_create_gtk();
 	mainwin_create_widgets();
 }
@@ -3768,11 +3668,7 @@ gint idle_func(gpointer data)
 	gchar stime_prefix, *tmp;
 	static gboolean waiting = FALSE;
 	static gint count = 0;
-	static gboolean was_playing = FALSE;
-	static gint last_time_ms = -1;
-	static gint stalled_ticks = 0;
-	static gint final_second_stall_ticks = 0;
-	static gint zero_remaining_ticks = 0;
+	static XmmsPlaybackMonitor monitor;
 	static gint last_logged_remaining_sec = -1;
 	gboolean is_playing;
 
@@ -3786,15 +3682,29 @@ gint idle_func(gpointer data)
 		vis_playback_start();
 		GDK_THREADS_LEAVE();
 		time = input_get_time();
+		length = playlist_get_current_length();
 
-		if (startup_resume_seek_pending && time >= 0)
+		if (startup_resume_seek_pending &&
+		    startup_resume_generation != input_get_generation())
+			startup_resume_seek_pending = FALSE;
+		if (startup_resume_seek_pending && time > 0)
 		{
-			input_seek(startup_resume_seek_time);
+			input_seek(xmms_resume_position(startup_resume_seek_time, length));
 			startup_resume_seek_pending = FALSE;
 			time = input_get_time();
 		}
+		if (time < 0)
+			startup_resume_seek_pending = FALSE;
+		if (xmms_playback_stalled_at_end(&monitor, input_get_generation(),
+				time, length, get_input_paused(), g_get_monotonic_time()))
+		{
+			log_track_end_state("no-progress-for-3s", time, length);
+			time = -1;
+		}
+		else if (monitor.advanced && !get_input_paused())
+			time = -1;
 
-		if (time == -1)
+		if (time == -1 && !get_input_paused())
 		{
 			if(cfg.pause_between_songs)
 			{
@@ -3834,6 +3744,8 @@ gint idle_func(gpointer data)
 				playlist_eof_reached();
 				GDK_THREADS_LEAVE();
 				waiting = FALSE;
+				monitor.initialized = FALSE;
+				last_logged_remaining_sec = -1;
 			}
 		}
 		else if (time == -2)
@@ -3843,7 +3755,7 @@ gint idle_func(gpointer data)
 			mainwin_stop_pushed();
 			GDK_THREADS_LEAVE();
 		}
-		else
+		else if (time >= 0)
 		{
 			gint remaining_ms, remaining_sec;
 
@@ -3857,140 +3769,19 @@ gint idle_func(gpointer data)
 			{
 				if (remaining_sec != last_logged_remaining_sec)
 				{
-					log_track_end_state("countdown", time, length, stalled_ticks);
+					log_track_end_state("countdown", time, length);
 					last_logged_remaining_sec = remaining_sec;
 				}
 			}
 			else
 				last_logged_remaining_sec = -1;
 
-			if (!get_input_paused() && remaining_sec == 0)
-				zero_remaining_ticks++;
-			else
-				zero_remaining_ticks = 0;
-
-			/*
-			 * Hard safety: if plugin reports we are at track end but does
-			 * not emit EOF, advance explicitly.
-			 */
-			if (!get_input_paused() &&
-			    length > 0 &&
-			    time >= (length - 120))
-			{
-				GDK_THREADS_ENTER();
-				playlist_eof_reached();
-				GDK_THREADS_LEAVE();
-				waiting = FALSE;
-				stalled_ticks = 0;
-				last_time_ms = -1;
-				zero_remaining_ticks = 0;
-				is_playing = get_input_playing();
-				if (!is_playing)
-					goto idle_draw_and_return;
-				time = input_get_time();
-				length = playlist_get_current_length();
-				last_logged_remaining_sec = -1;
-			}
-
-			/*
-			 * Some plugins can get stuck on the final seconds and never
-			 * report EOF. If time no longer advances near the known track
-			 * end for a while, force EOF handling.
-			 */
-			if (!get_input_paused() &&
-			    length > 0 &&
-			    time >= (length - 15000))
-			{
-				gint stall_limit = (time >= (length - 1200)) ? 40 : 300;
-
-				if (last_time_ms >= 0 && time <= (last_time_ms + 50))
-					stalled_ticks++;
-				else
-					stalled_ticks = 0;
-
-				if (stalled_ticks >= stall_limit)
-				{
-					log_track_end_state("stalled-final-ms", time, length, stalled_ticks);
-					GDK_THREADS_ENTER();
-					playlist_eof_reached();
-					GDK_THREADS_LEAVE();
-					waiting = FALSE;
-					stalled_ticks = 0;
-					final_second_stall_ticks = 0;
-					zero_remaining_ticks = 0;
-					last_time_ms = -1;
-					last_logged_remaining_sec = -1;
-					is_playing = get_input_playing();
-					if (!is_playing)
-						goto idle_draw_and_return;
-					time = input_get_time();
-					length = playlist_get_current_length();
-				}
-			}
-			else
-				stalled_ticks = 0;
-
-			/*
-			 * Some files stop on the final displayed second without the
-			 * millisecond counter ever quite reaching the metadata length.
-			 */
-			if (!get_input_paused() &&
-			    length > 0 &&
-			    (time / 1000) >= (length / 1000))
-			{
-				if (last_time_ms >= 0 && time <= (last_time_ms + 50))
-					final_second_stall_ticks++;
-				else
-					final_second_stall_ticks = 0;
-
-				if (final_second_stall_ticks >= 40)
-				{
-					log_track_end_state("stalled-final-second", time, length, final_second_stall_ticks);
-					GDK_THREADS_ENTER();
-					playlist_eof_reached();
-					GDK_THREADS_LEAVE();
-					waiting = FALSE;
-					stalled_ticks = 0;
-					final_second_stall_ticks = 0;
-					last_time_ms = -1;
-					last_logged_remaining_sec = -1;
-					is_playing = get_input_playing();
-					if (!is_playing)
-						goto idle_draw_and_return;
-					time = input_get_time();
-					length = playlist_get_current_length();
-				}
-			}
-			else
-				final_second_stall_ticks = 0;
-
-			if (!get_input_paused() &&
-			    length > 0 &&
-			    zero_remaining_ticks >= 100)
-			{
-				log_track_end_state("displayed-zero-remaining", time, length, zero_remaining_ticks);
-				GDK_THREADS_ENTER();
-				playlist_eof_reached();
-				GDK_THREADS_LEAVE();
-				waiting = FALSE;
-				stalled_ticks = 0;
-				final_second_stall_ticks = 0;
-				zero_remaining_ticks = 0;
-				last_time_ms = -1;
-				last_logged_remaining_sec = -1;
-				is_playing = get_input_playing();
-				if (!is_playing)
-					goto idle_draw_and_return;
-				time = input_get_time();
-				length = playlist_get_current_length();
-			}
-
 			if (cfg.timer_mode == TIMER_REMAINING)
 			{
 				if (length != -1)
 				{
 					number_set_number(mainwin_minus_num, 11);
-					t = length - time;
+					t = MAX(0, length - time);
 					stime_prefix = '-';
 				}
 				else
@@ -4073,44 +3864,15 @@ gint idle_func(gpointer data)
 		if(time != -1)
 			waiting = FALSE;
 
-		last_time_ms = time;
 	}
 	else
 	{
-		/*
-		 * Some output/input backends may flip the playing flag to FALSE
-		 * at song end without first reporting time == -1. Detect that by
-		 * checking that we were very close to track end.
-		 */
-		if (was_playing &&
-		    !get_input_paused() &&
-		    last_time_ms >= 0)
-		{
-			gint current_length = playlist_get_current_length();
-			if (current_length > 0 && last_time_ms >= (current_length - 5000))
-			{
-			log_track_end_state("playback-flag-dropped", last_time_ms, current_length, stalled_ticks);
-			GDK_THREADS_ENTER();
-			playlist_eof_reached();
-			GDK_THREADS_LEAVE();
-			is_playing = get_input_playing();
-			}
-		}
-
-		if (!is_playing)
-		{
-		GDK_THREADS_ENTER();
 		vis_playback_stop();
-		GDK_THREADS_LEAVE();
-		}
-		last_time_ms = -1;
-		stalled_ticks = 0;
-		final_second_stall_ticks = 0;
-		zero_remaining_ticks = 0;
+		monitor.initialized = FALSE;
+		waiting = FALSE;
+		startup_resume_seek_pending = FALSE;
 		last_logged_remaining_sec = -1;
 	}
-
-idle_draw_and_return:
 
 	GDK_THREADS_ENTER();
 	check_ctrlsocket();
@@ -4139,7 +3901,6 @@ idle_draw_and_return:
 	}
 
 	GDK_THREADS_LEAVE();
-	was_playing = get_input_playing();
 
 	return TRUE;
 
@@ -4750,16 +4511,15 @@ gtk_inited:
 	handle_cmd_line_options(&options, FALSE); 
 	GDK_THREADS_ENTER();
 
-	if (cfg.resume_playback_on_startup &&
-	    cfg.resume_playback_was_playing &&
-	    cfg.resume_playback_time > 0 &&
-	    !explicit_playback_request &&
-	    get_playlist_length() > 0)
+	if (xmms_resume_should_start(cfg.resume_playback_on_startup,
+			cfg.resume_playback_was_playing, cfg.resume_playback_time,
+			explicit_playback_request, get_playlist_length()))
 	{
 		playlist_set_position(cfg.playlist_position);
 		playlist_play();
 		startup_resume_seek_pending = TRUE;
 		startup_resume_seek_time = cfg.resume_playback_time;
+		startup_resume_generation = input_get_generation();
 	}
 
 	mainwin_set_info_text();

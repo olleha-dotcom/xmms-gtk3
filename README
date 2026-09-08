@@ -18,8 +18,11 @@ Highlights in this branch:
 - Packaging helper: `packaging/build-deb.sh`.
 
 Versioning note:
-- The About dialog and package version identify this branch as 1.5.3
-  (GTK3 port line), while retaining XMMS 1.2.x codebase heritage.
+- VERSION is the single upstream version source. Read it with `cat VERSION`;
+  configure, the About dialog and Debian packaging use that value. The
+  independent libxmms library version describes its ABI, not the application.
+- Debian bugfix builds retain the upstream version and change PKG_REVISION.
+  The packaging helper defaults to revision 2ubuntu24.04.
 
 
 TABLE OF CONTENTS
@@ -27,8 +30,8 @@ TABLE OF CONTENTS
 
 1. Disclaimer
 2. Installation
-   2.1 Basic Installation
-   2.2 Border less Installation
+   2.1 Building, Testing and Debian Packaging
+   2.2 PulseAudio and Display Scaling
    2.3 Skin Installation
 3. Documentation
    3.1 Controlling XMMS
@@ -58,6 +61,7 @@ TABLE OF CONTENTS
             3.6.2.3 eSound Output
             3.6.2.4 BSD Sun Output
             3.6.2.5 ALSA Output
+            3.6.2.6 PulseAudio Output
       3.6.3 Effect plugins
             3.6.3.1 Echo
             3.6.3.2 Extra Stereo
@@ -95,77 +99,112 @@ XMMS is NOT a port of windows95's WinAmp. We just borrowed the GUI! :)
 2. Installation
 ---------------
 
-These libraries are needed to compile XMMS.
+The supported build/CI baseline is Ubuntu 24.04 with GTK 3.24+, GLib 2.56+
+and libpulse 12+. From a fresh checkout, install the build and test tools:
 
-   gtk+ 3.24 and glib 2.56 or better.
-   https://www.gtk.org/
+    sudo apt-get update
+    sudo apt-get install -y --no-install-recommends \
+      build-essential autoconf automake libtool pkg-config gettext \
+      dpkg-dev binutils libgtk-3-dev libglib2.0-dev libpulse-dev \
+      libasound2-dev libogg-dev libvorbis-dev zlib1g-dev \
+      libsm-dev libice-dev libx11-dev libxext-dev libxtst-dev libxxf86vm-dev libgl-dev \
+      pulseaudio-utils xvfb xauth desktop-file-utils unzip
 
-For libc5 users, you also need to obtain,
+MikMod support is optional. To include its module-file input plugin, install
+its development package before configuring or building a Debian package:
 
-   gnu gettext 0.10 (use configure --with-gnu-gettext)
-   ftp://prep.ai.mit.edu/pub/gnu/gettext/gettext-0.10.tar.gz
+    sudo apt-get install -y libmikmod-dev
 
-   linuxthreads 0.71
-   http://www.xmms.org/files/libc5/linuxthreads.tar.gz
+Use the desktop's existing PulseAudio or PipeWire-Pulse server for playback.
+For a headless test machine without an audio server, also install the daemon:
 
-   Thread safe Xlibs (at least aware)
-   http://www.xmms.org/files/libc5/XFree86-3.3-libs.tar.gz (thread aware)
+    sudo apt-get install -y pulseaudio
 
-If you want XMMS to play mod/s3m/med and formats supported by mikmod
-you need to install libmikmod before running ./configure on XMMS.
+2.1 Building, Testing and Debian Packaging
+-----------------------------------------
 
-   http://www.ibiblio.org/pub/linux/apps/sound/libs/
+Run these commands at the repository root. Always regenerate Autotools files;
+old generated files in the tree are not authoritative build inputs.
 
-For the OpenGL plugin you'll need Mesa 3.0 or better.
+    autoreconf --force --install
+    ./configure --prefix=/usr \
+      --libdir="/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)" \
+      --disable-esd --disable-oss
+    make -j"$(nproc)"
+    ./xmms/xmms
 
-   http://www.mesa3d.org/
+This builds PulseAudio, ALSA, MPEG, WAV, Vorbis and the other available
+plugins. MikMod is built only when its development package is present; CI
+includes it. Debian runtime dependencies reflect the plugins actually built.
+Obsolete OSS and eSound output are disabled in the documented build.
+NLS is currently disabled in this port. Prefer the package install below to
+an untracked `sudo make install` into /usr.
 
-To compile the Ogg Vorbis plugin you'll need libvorbis from:
+Regression and AddressSanitizer/UndefinedBehaviorSanitizer tests:
 
-   http://www.vorbis.com/download_unix.psp
+    make check
+    make check-sanitizers
 
-2.1 Basic Installation
-----------------------
+The sanitizer target invokes tests/run-sanitizers.sh. Integration tests create
+their own temporary PulseAudio null sink and Xvfb display. They do not connect
+to your desktop audio server, change its volume, or use your XMMS config.
+Install pulseaudio and xvfb to run these tests; a missing test daemon causes
+the corresponding integration test to be reported as SKIP, not PASS.
+CI performs a fresh Autotools build, both test targets, package verification
+and a local package installation on Ubuntu 24.04. It does not publish releases.
 
-cd xmms-1.2.8
-./configure
-make
-make install
+To build and install a Debian package (no root privileges needed to build):
 
-This will put the binary in /usr/local/bin and plugins in
-/usr/local/lib/xmms/
+    bash packaging/build-deb.sh
+    deb="./xmms-gtk3_$(cat VERSION)-2ubuntu24.04_$(dpkg --print-architecture).deb"
+    bash packaging/check-deb.sh "$deb"
+    sudo apt-get install "$deb"
 
-2.2 Borderless Installation
----------------------------
+The helper rebuilds a filtered copy in a temporary directory. It does not run
+make clean, reuse your existing configure state, or change your in-tree build.
+It installs to /usr/bin and /usr/lib/<multiarch>/xmms, with bundled libxmms in
+/usr/lib/<multiarch>, and includes a desktop entry and icon. Package entries
+are root:root via dpkg-deb --root-owner-group, not by running the build as root.
+Runtime Depends are calculated with dpkg-shlibdeps across the executable and
+every plugin/shared library; bundled libxmms never becomes an external package
+dependency. The verifier repeats this calculation and checks the payload.
+See https://manpages.debian.org/bookworm/dpkg-dev/dpkg-shlibdeps.1.en.html.
 
-As far as I know most WM's accepts GTK decoration hints so it will
-not have borders. But some WM's can't handle this so you have to
-set in manually.
+Existing release files are never deleted, reused or overwritten. To repeat
+the same build, select an empty OUT_DIR; for a new package revision, set
+PKG_REVISION. JOBS controls make parallelism. For example:
 
-AfterStep 1.0 ~/.steprc
-Style "XMMS_Player" NoTitle, NoHandles
-Style "XMMS_Playlist" NoTitle, NoHandles
-Style "XMMS_Equalizer" NoTitle, NoHandles
+    OUT_DIR=/tmp/xmms-package-rebuild JOBS=2 bash packaging/build-deb.sh
 
-AfterStep 1.4 ~/GNUstep/Library/AfterStep/database
-Style "XMMS_Player" NoTitle, NoHandles
-Style "XMMS_Playlist" NoTitle, NoHandles
-Style "XMMS_Equalizer" NoTitle, NoHandles
+SOURCE_DATE_EPOCH controls package timestamps. It defaults to the last Git
+commit timestamp, or VERSION's mtime when building an exported source tree.
+The helper normalizes staged timestamps and compiler build paths. Reproducible
+comparisons require identical sources, dependencies, toolchain, build flags
+and SOURCE_DATE_EPOCH; set the latter explicitly when comparing exported trees.
+Only the helper's own temporary workspace is removed when it exits.
 
-Fvwm's ~/.fvwm95rc
-Style "XMMS_Player" NoTitle
-Style "XMMS_Playlist" NoTitle
-Style "XMMS_Equalizer" NoTitle
+2.2 PulseAudio and Display Scaling
+----------------------------------
 
-CTWM's ~/.ctwmrc
-NoTitle and NoBorder sections:
-NoTitle {
-    "xmms"
-}
+In Preferences (Ctrl+P), Audio I/O Plugins, choose the PulseAudio output plugin.
+It uses libpulse directly and works with PulseAudio or a PipeWire-Pulse server;
+no padsp/OSS wrapper is needed. ALSA remains available for direct device access.
+PulseAudio settings live in the [PulseAudio] section of ~/.xmms/config:
+server and device select a server and sink, and empty values use the defaults.
+stream_name names the playback stream. Stop XMMS before editing its config.
 
-NoBorder {
-    "xmms"
-}
+XMMS prefers X11 (Xwayland on a Wayland desktop) for its undecorated skin
+windows when GDK_BACKEND is unset. In that case, it defaults GDK_SCALE to 2
+unless you set it yourself. Override GTK's integer window scaling explicitly:
+
+    GDK_SCALE=1 xmms
+    GDK_SCALE=2 xmms
+    GDK_BACKEND=x11 GDK_SCALE=2 GDK_DPI_SCALE=0.5 xmms
+
+GDK_DPI_SCALE adjusts text scaling, not the skin's pixel dimensions. The
+legacy Double Size option also enlarges the skin and is separate from GTK
+scaling. Use the scale that fits your display rather than changing window
+manager rules. GTK environment reference: https://docs.gtk.org/gtk3/running.html.
 
 2.3 Skin Installation
 ---------------------
@@ -179,8 +218,7 @@ XMMS currently reads the following formats: zip, wsz, tar, tar.gz and tar.bz2
 Just copy the archive to one of the skin path's and XMMS will take care of the
 rest.
 
-In order to support zipped skins you will need to download unzip.
-ftp://sunsite.unc.edu/pub/Linux/utils/compress/unzip-5.31.tar.gz
+Zipped skins require the unzip package (`sudo apt-get install unzip`).
 
 If you do not wish to have unzip in your path, then set the variable UNZIPCMD
 to the directory in which you keep the unzip command.
@@ -960,6 +998,14 @@ playback status.
 3.6.2.5 ALSA Output
 -------------------
 Undocumented.
+
+
+3.6.2.6 PulseAudio Output
+-------------------------
+Use this output on current PulseAudio and PipeWire-Pulse desktops. It uses
+the native libpulse API rather than libpulse-simple or an OSS wrapper.
+Select it in Preferences / Audio I/O Plugins. See section 2.2 for server,
+sink and stream-name settings.
 
 
 3.6.3 Effect plugins

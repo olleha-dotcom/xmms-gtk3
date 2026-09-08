@@ -16,7 +16,8 @@ void pulse_save_config(void)
 	xmms_cfg_write_string(cfgfile, "PulseAudio", "stream_name", pulse_cfg.stream_name ? pulse_cfg.stream_name : "XMMS");
 	xmms_cfg_write_int(cfgfile, "PulseAudio", "volume_left", CLAMP(pulse_cfg.volume_left, 0, 100));
 	xmms_cfg_write_int(cfgfile, "PulseAudio", "volume_right", CLAMP(pulse_cfg.volume_right, 0, 100));
-	xmms_cfg_write_default_file(cfgfile);
+	if (!xmms_cfg_write_default_file(cfgfile))
+		g_warning("Unable to save PulseAudio settings");
 	xmms_cfg_free(cfgfile);
 }
 
@@ -31,19 +32,21 @@ void pulse_init(void)
 
 	cfgfile = xmms_cfg_open_default_file();
 	if (!cfgfile)
+	{
+		pulse_start();
 		return;
+	}
 
 	xmms_cfg_read_string(cfgfile, "PulseAudio", "server", &pulse_cfg.server);
 	xmms_cfg_read_string(cfgfile, "PulseAudio", "device", &pulse_cfg.device);
+	g_free(pulse_cfg.stream_name);
 	if (!xmms_cfg_read_string(cfgfile, "PulseAudio", "stream_name", &pulse_cfg.stream_name))
-	{
-		g_free(pulse_cfg.stream_name);
 		pulse_cfg.stream_name = g_strdup("XMMS");
-	}
 	xmms_cfg_read_int(cfgfile, "PulseAudio", "volume_left", &pulse_cfg.volume_left);
 	xmms_cfg_read_int(cfgfile, "PulseAudio", "volume_right", &pulse_cfg.volume_right);
 	pulse_cfg.volume_left = CLAMP(pulse_cfg.volume_left, 0, 100);
 	pulse_cfg.volume_right = CLAMP(pulse_cfg.volume_right, 0, 100);
 
 	xmms_cfg_free(cfgfile);
+	pulse_start();
 }

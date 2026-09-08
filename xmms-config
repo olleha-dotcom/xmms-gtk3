@@ -12,7 +12,7 @@
 #
 # This work is released under the GNU GPL, version 2 or later.
 
-prefix="/usr/local"
+prefix="/usr"
 exec_prefix="${prefix}"
 exec_prefix_set=no
 data_dir="${prefix}/share/xmms"
@@ -20,7 +20,7 @@ data_dir="${prefix}/share/xmms"
 version="1.5.3"
 include_dir="${prefix}/include"
 xmms_include_dir="${prefix}/include/xmms"
-lib_dir="${exec_prefix}/lib"
+lib_dir="/usr/lib/x86_64-linux-gnu"
 
 if ( (gtk-config --version) > /dev/null 2>&1)  then
    gtk_libs=`gtk-config --libs`
@@ -30,12 +30,12 @@ else
    gtk_cflags="-I/usr/include/gtk-3.0 -I/usr/include/pango-1.0 -I/usr/include/glib-2.0 -I/usr/lib/x86_64-linux-gnu/glib-2.0/include -I/usr/include/harfbuzz -I/usr/include/freetype2 -I/usr/include/libpng16 -I/usr/include/libmount -I/usr/include/blkid -I/usr/include/fribidi -I/usr/include/cairo -I/usr/include/pixman-1 -I/usr/include/gdk-pixbuf-2.0 -I/usr/include/x86_64-linux-gnu -I/usr/include/webp -I/usr/include/gio-unix-2.0 -I/usr/include/atk-1.0 -I/usr/include/at-spi2-atk/2.0 -I/usr/include/at-spi-2.0 -I/usr/include/dbus-1.0 -I/usr/lib/x86_64-linux-gnu/dbus-1.0/include -pthread "
 fi
 
-plugin_dir="${exec_prefix}/lib/xmms"
-visualization_plugin_dir="${exec_prefix}/lib/xmms/Visualization"
-input_plugin_dir="${exec_prefix}/lib/xmms/Input"
-output_plugin_dir="${exec_prefix}/lib/xmms/Output"
-effect_plugin_dir="${exec_prefix}/lib/xmms/Effect"
-general_plugin_dir="${exec_prefix}/lib/xmms/General"
+plugin_dir="/usr/lib/x86_64-linux-gnu/xmms"
+visualization_plugin_dir="/usr/lib/x86_64-linux-gnu/xmms/Visualization"
+input_plugin_dir="/usr/lib/x86_64-linux-gnu/xmms/Input"
+output_plugin_dir="/usr/lib/x86_64-linux-gnu/xmms/Output"
+effect_plugin_dir="/usr/lib/x86_64-linux-gnu/xmms/Effect"
+general_plugin_dir="/usr/lib/x86_64-linux-gnu/xmms/General"
 
 usage()
 {

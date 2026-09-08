@@ -349,6 +349,8 @@ SET_MAKE = @SET_MAKE@
 SHELL = @SHELL@
 SM_LIBS = @SM_LIBS@
 STRIP = @STRIP@
+TEST_X11_CFLAGS = @TEST_X11_CFLAGS@
+TEST_X11_LIBS = @TEST_X11_LIBS@
 USE_INCLUDED_LIBINTL = @USE_INCLUDED_LIBINTL@
 USE_IPV6 = @USE_IPV6@
 USE_NLS = @USE_NLS@
@@ -422,9 +424,17 @@ top_build_prefix = @top_build_prefix@
 top_builddir = @top_builddir@
 top_srcdir = @top_srcdir@
 xmmsdir = @xmmsdir@
-SUBDIRS = intl libxmms xmms Output Input Effect General Visualization
+SUBDIRS = intl libxmms xmms Output Input Effect General Visualization tests
 bin_SCRIPTS = xmms-config
-EXTRA_DIST = xmms.spec xmms.spec.in FAQ xmms.m4
+CONFIGURE_DEPENDENCIES = $(srcdir)/VERSION
+gtk_compat_headers = $(patsubst $(srcdir)/%,%,$(wildcard $(srcdir)/gtk_compat/*.h))
+EXTRA_DIST = xmms.spec xmms.spec.in FAQ xmms.m4 VERSION gtk_compat.h \
+	$(gtk_compat_headers) GTK3_PORTING.md LICENSE \
+	packaging/build-deb.sh packaging/runtime-deps.sh packaging/check-deb.sh \
+	packaging/source-excludes packaging/xmms.desktop \
+	packaging/postinst packaging/postrm \
+	tests/run-sanitizers.sh .github/workflows/ci.yml
+
 m4datadir = $(datadir)/aclocal
 m4data_DATA = xmms.m4
 man_MANS = xmms.1
@@ -438,15 +448,15 @@ $(srcdir)/Makefile.in:  $(srcdir)/Makefile.am  $(am__configure_deps)
 	@for dep in $?; do \
 	  case '$(am__configure_deps)' in \
 	    *$$dep*) \
-	      echo ' cd $(srcdir) && $(AUTOMAKE) --gnu'; \
-	      $(am__cd) $(srcdir) && $(AUTOMAKE) --gnu \
+	      echo ' cd $(srcdir) && $(AUTOMAKE) --foreign'; \
+	      $(am__cd) $(srcdir) && $(AUTOMAKE) --foreign \
 		&& exit 0; \
 	      exit 1;; \
 	  esac; \
 	done; \
-	echo ' cd $(top_srcdir) && $(AUTOMAKE) --gnu Makefile'; \
+	echo ' cd $(top_srcdir) && $(AUTOMAKE) --foreign Makefile'; \
 	$(am__cd) $(top_srcdir) && \
-	  $(AUTOMAKE) --gnu Makefile
+	  $(AUTOMAKE) --foreign Makefile
 Makefile: $(srcdir)/Makefile.in $(top_builddir)/config.status
 	@case '$?' in \
 	  *config.status*) \
@@ -1034,6 +1044,10 @@ uninstall-man: uninstall-man1
 
 .PRECIOUS: Makefile
 
+
+.PHONY: check-sanitizers
+check-sanitizers:
+	bash "$(srcdir)/tests/run-sanitizers.sh"
 
 # Tell versions [3.59,3.63) of GNU make to not export all variables.
 # Otherwise a system limit (for SysV at least) may be exceeded.

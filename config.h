@@ -86,7 +86,7 @@
 /* #undef HAVE_NEWPCM */
 
 /* Define if the OSS output plugin should be built */
-#define HAVE_OSS 1
+/* #undef HAVE_OSS */
 
 /* Define to 1 if you have the `sched_get_priority_max' function. */
 #define HAVE_SCHED_GET_PRIORITY_MAX 1
@@ -149,19 +149,19 @@
 #define PACKAGE_BUGREPORT ""
 
 /* Define to the full name of this package. */
-#define PACKAGE_NAME ""
+#define PACKAGE_NAME "xmms"
 
 /* Define to the full name and version of this package. */
-#define PACKAGE_STRING ""
+#define PACKAGE_STRING "xmms 1.5.3"
 
 /* Define to the one symbol short name of this package. */
-#define PACKAGE_TARNAME ""
+#define PACKAGE_TARNAME "xmms"
 
 /* Define to the home page for this package. */
 #define PACKAGE_URL ""
 
 /* Define to the version of this package. */
-#define PACKAGE_VERSION ""
+#define PACKAGE_VERSION "1.5.3"
 
 /* The size of `long', as computed by sizeof. */
 #define SIZEOF_LONG 8

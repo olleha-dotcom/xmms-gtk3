@@ -543,6 +543,7 @@ void dock_move_press(GList *window_list, GtkWidget *w, GdkEventButton *event, gb
 	dock_get_widget_pos(w, &win_x, &win_y);
 	if (event)
 	{
+		/* Root coordinates stay in GDK logical units, never skin units. */
 		offset_x = (gint) event->x_root - win_x;
 		offset_y = (gint) event->y_root - win_y;
 	}

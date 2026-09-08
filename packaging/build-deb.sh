@@ -1,91 +1,117 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export LC_ALL=C TZ=UTC
+umask 022
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT_DIR"
+PKG_NAME=xmms-gtk3
+PKG_VERSION="$(cat "$ROOT_DIR/VERSION")"
+PKG_REVISION="${PKG_REVISION:-2ubuntu24.04}"
+OUT_DIR="${OUT_DIR:-$ROOT_DIR}"
+JOBS="${JOBS:-$(nproc)}"
 
-PKG_NAME="xmms-gtk3"
-PKG_VERSION="1.5.3"
-PKG_REVISION="1ubuntu24.04"
+die() { printf 'build-deb: %s\n' "$*" >&2; exit 1; }
+[[ $# == 0 ]] || die 'Use PKG_REVISION, OUT_DIR, JOBS and SOURCE_DATE_EPOCH environment variables; no arguments are accepted.'
+[[ $PKG_VERSION =~ ^[0-9]+(\.[0-9]+)*$ ]] || die 'Invalid upstream VERSION.'
+[[ $PKG_REVISION =~ ^[A-Za-z0-9.+]+$ ]] || die 'Invalid Debian revision.'
+[[ $JOBS =~ ^[1-9][0-9]*$ ]] || die 'JOBS must be a positive integer.'
+for tool in autoreconf automake libtoolize pkg-config make cc dpkg dpkg-deb \
+            dpkg-architecture dpkg-buildflags dpkg-shlibdeps readelf strip \
+            tar desktop-file-validate; do
+    command -v "$tool" >/dev/null || die "Missing build dependency: $tool (see README)."
+done
+
 ARCH="$(dpkg --print-architecture)"
-MAINTAINER="Olle Hallnas <olle@example.invalid>"
-DESCRIPTION="XMMS (GTK3 port)"
+MULTIARCH="$(dpkg-architecture -qDEB_HOST_MULTIARCH)"
+[[ $(dpkg-architecture -qDEB_HOST_ARCH) == "$ARCH" ]] || die 'Cross-packaging is not supported.'
+mkdir -p "$OUT_DIR"
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
+OUT_DEB="$OUT_DIR/${PKG_NAME}_${PKG_VERSION}-${PKG_REVISION}_${ARCH}.deb"
+[[ ! -e $OUT_DEB && ! -L $OUT_DEB ]] || die "Release already exists: $OUT_DEB. Choose a different OUT_DIR or PKG_REVISION."
 
-BUILD_ROOT="${ROOT_DIR}/.pkgbuild"
-STAGE_DIR="${BUILD_ROOT}/${PKG_NAME}_${PKG_VERSION}-${PKG_REVISION}_${ARCH}"
-INSTALL_ROOT="${STAGE_DIR}"
-DEBIAN_DIR="${INSTALL_ROOT}/DEBIAN"
-OUT_DEB="${ROOT_DIR}/${PKG_NAME}_${PKG_VERSION}-${PKG_REVISION}_${ARCH}.deb"
-OUT_DEB_TMP="/tmp/${PKG_NAME}_${PKG_VERSION}-${PKG_REVISION}_${ARCH}.deb"
+pkg-config --exists 'gtk+-3.0 >= 3.24' 'glib-2.0 >= 2.56' \
+    'libpulse >= 12' alsa vorbisfile || die 'Install the Ubuntu build dependencies listed in README.'
 
-rm -rf "$BUILD_ROOT"
-mkdir -p "$DEBIAN_DIR"
-
-# Install project into staging.
-make install DESTDIR="$INSTALL_ROOT"
-
-# Install desktop integration.
-mkdir -p "${INSTALL_ROOT}/usr/share/applications" "${INSTALL_ROOT}/usr/share/pixmaps"
-if [ -f "${ROOT_DIR}/xmms/xmms.png" ]; then
-	install -m 0644 "${ROOT_DIR}/xmms/xmms.png" "${INSTALL_ROOT}/usr/share/pixmaps/xmms.png"
+if [[ -z ${SOURCE_DATE_EPOCH:-} ]]; then
+    SOURCE_DATE_EPOCH="$(git -C "$ROOT_DIR" log -1 --format=%ct -- . 2>/dev/null || true)"
+    SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(stat -c %Y "$ROOT_DIR/VERSION")}"
 fi
-cat > "${INSTALL_ROOT}/usr/share/applications/xmms.desktop" <<'DESKTOP'
-[Desktop Entry]
-Type=Application
-Name=XMMS
-Comment=X Multimedia System
-Exec=xmms
-Icon=xmms
-Terminal=false
-StartupWMClass=XMMS_Player
-Categories=AudioVideo;Audio;Player;GTK;
-MimeType=audio/x-scpls;audio/x-mpegurl;audio/mpegurl;audio/mp3;audio/x-mp3;audio/mpeg;audio/x-mpeg;audio/x-wav;application/x-ogg;
-DESKTOP
+[[ $SOURCE_DATE_EPOCH =~ ^[0-9]+$ ]] || die 'SOURCE_DATE_EPOCH must be an integer timestamp.'
+export SOURCE_DATE_EPOCH
 
-cat > "${DEBIAN_DIR}/control" <<CONTROL
-Package: ${PKG_NAME}
-Version: ${PKG_VERSION}-${PKG_REVISION}
+# Keep all generated state outside the user's tree, even for an in-tree build.
+BUILD_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/xmms-deb.XXXXXXXX")"
+trap 'rm -rf -- "$BUILD_ROOT"' EXIT
+BUILD_ROOT="$(cd "$BUILD_ROOT" && pwd -P)"
+case "$BUILD_ROOT/" in
+    "$(cd "$ROOT_DIR" && pwd -P)/"*) die 'TMPDIR must be outside the source tree.' ;;
+esac
+SOURCE_DIR="$BUILD_ROOT/source"
+STAGE_DIR="$BUILD_ROOT/stage"
+mkdir -p "$SOURCE_DIR" "$STAGE_DIR/DEBIAN"
+tar -C "$ROOT_DIR" --exclude-from="$ROOT_DIR/packaging/source-excludes" \
+    -cf - . | tar -C "$SOURCE_DIR" -xf -
+
+(
+    cd "$SOURCE_DIR"
+    # Do not inherit make overrides, configure site/cache settings or plugin lists.
+    unset MAKEFLAGS MFLAGS MAKEOVERRIDES CONFIG_SHELL
+    unset INPUT_PLUGINS OUTPUT_PLUGINS EFFECT_PLUGINS GENERAL_PLUGINS VISUALIZATION_PLUGINS
+    export CONFIG_SITE=/dev/null
+    CFLAGS="$(dpkg-buildflags --get CFLAGS) -ffile-prefix-map=$BUILD_ROOT=. -fdebug-prefix-map=$BUILD_ROOT=."
+    CPPFLAGS="$(dpkg-buildflags --get CPPFLAGS)"
+    LDFLAGS="$(dpkg-buildflags --get LDFLAGS)"
+    export CFLAGS CPPFLAGS LDFLAGS
+    autoreconf --force --install
+    ./configure --prefix=/usr --libdir="/usr/lib/$MULTIARCH" \
+        --disable-static --disable-esd --disable-oss --cache-file=/dev/null
+    make -j"$JOBS"
+    make install DESTDIR="$STAGE_DIR"
+)
+
+install -Dm0644 "$SOURCE_DIR/packaging/xmms.desktop" "$STAGE_DIR/usr/share/applications/xmms.desktop"
+install -Dm0644 "$SOURCE_DIR/xmms/xmms.png" "$STAGE_DIR/usr/share/pixmaps/xmms.png"
+for doc in README AUTHORS COPYING LICENSE; do
+    install -Dm0644 "$SOURCE_DIR/$doc" "$STAGE_DIR/usr/share/doc/$PKG_NAME/$doc"
+done
+
+# Libtool archives contain build-machine paths and are not needed at runtime.
+find "$STAGE_DIR/usr/lib" -type f \( -name '*.la' -o -name '*.a' \) -delete
+while IFS= read -r -d '' binary; do
+    if readelf --file-header "$binary" >/dev/null 2>&1; then
+        strip --strip-unneeded "$binary"
+    fi
+done < <(find "$STAGE_DIR/usr" -type f -print0 | sort -z)
+
+DEPENDS="$(bash "$SOURCE_DIR/packaging/runtime-deps.sh" "$STAGE_DIR")"
+[[ -n $DEPENDS ]] || die 'dpkg-shlibdeps produced an empty Depends field.'
+INSTALLED_SIZE="$(du -sk "$STAGE_DIR/usr" | cut -f1)"
+cat > "$STAGE_DIR/DEBIAN/control" <<CONTROL
+Package: $PKG_NAME
+Version: $PKG_VERSION-$PKG_REVISION
 Section: sound
 Priority: optional
-Architecture: ${ARCH}
-Maintainer: ${MAINTAINER}
-Depends: libc6, libglib2.0-0, libgtk-3-0, libgdk-pixbuf-2.0-0, libpango-1.0-0, libatk1.0-0, libx11-6
-Description: ${DESCRIPTION}
- Classic XMMS media player with GTK3 compatibility updates.
+Architecture: $ARCH
+Maintainer: Olle Hallnas <olle@olleha.com>
+Installed-Size: $INSTALLED_SIZE
+Depends: $DEPENDS
+Recommends: unzip
+Description: XMMS media player with GTK3 and PulseAudio support
+ Classic skinnable XMMS player with GTK3 compatibility and native
+ PulseAudio output, also usable with PipeWire's PulseAudio server.
 CONTROL
+install -m0755 "$SOURCE_DIR/packaging/postinst" "$STAGE_DIR/DEBIAN/postinst"
+install -m0755 "$SOURCE_DIR/packaging/postrm" "$STAGE_DIR/DEBIAN/postrm"
+(
+    cd "$STAGE_DIR"
+    find usr -type f -print0 | sort -z | xargs -0 md5sum > DEBIAN/md5sums
+)
+find "$STAGE_DIR" -type d -exec chmod 0755 {} +
+find "$STAGE_DIR" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
 
-cat > "${DEBIAN_DIR}/postinst" <<'POSTINST'
-#!/bin/sh
-set -e
-if [ "$1" = "configure" ] || [ "$1" = "triggered" ]; then
-	ldconfig
-	if command -v update-desktop-database >/dev/null 2>&1; then
-		update-desktop-database -q /usr/share/applications || true
-	fi
-fi
-exit 0
-POSTINST
-
-cat > "${DEBIAN_DIR}/postrm" <<'POSTRM'
-#!/bin/sh
-set -e
-if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
-	ldconfig
-	if command -v update-desktop-database >/dev/null 2>&1; then
-		update-desktop-database -q /usr/share/applications || true
-	fi
-fi
-exit 0
-POSTRM
-
-chmod 0755 "$DEBIAN_DIR"
-chmod 0755 "${DEBIAN_DIR}/postinst" "${DEBIAN_DIR}/postrm"
-find "$INSTALL_ROOT" -type d -print0 | xargs -0 chmod 0755
-
-# Build .deb
-rm -f "$OUT_DEB"
-dpkg-deb --build "$INSTALL_ROOT" "$OUT_DEB"
-cp -f "$OUT_DEB" "$OUT_DEB_TMP"
-
-echo "Built: $OUT_DEB"
-echo "Copy:  $OUT_DEB_TMP"
+# Verify before publishing the file, and never replace an existing release.
+TEMP_DEB="$BUILD_ROOT/package.deb"
+dpkg-deb --root-owner-group --threads-max=1 -Zxz --build "$STAGE_DIR" "$TEMP_DEB"
+bash "$SOURCE_DIR/packaging/check-deb.sh" "$TEMP_DEB"
+(set -o noclobber; cat "$TEMP_DEB" > "$OUT_DEB") || die "Could not create release: $OUT_DEB"
+printf 'Built: %s\n' "$OUT_DEB"

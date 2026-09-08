@@ -18,6 +18,7 @@
  *  Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  */
 #include "xmms.h"
+#include "ui_scale.h"
 #include "libxmms/dirbrowser.h"
 #include "libxmms/util.h"
 
@@ -49,15 +50,17 @@ Vis *playlistwin_vis;
 static GList *playlistwin_wlist = NULL;
 static gboolean playlistwin_vis_enabled = FALSE;
 
+static gint playlistwin_scale(void)
+{
+	return xmms_ui_skin_scale(XMMS_UI_PLAYLIST, cfg.doublesize,
+				  cfg.eq_doublesize_linked);
+}
+
 static gboolean playlistwin_draw_cb(GtkWidget *widget, cairo_t *cr, gpointer data)
 {
 	(void) widget;
 	(void) data;
-	if (!playlistwin_bg || !cr)
-		return FALSE;
-	cairo_set_source_surface(cr, playlistwin_bg, 0, 0);
-	cairo_paint(cr);
-	return TRUE;
+	return xmms_cairo_paint_skin(cr, playlistwin_bg, playlistwin_scale());
 }
 
 static struct {
@@ -411,6 +414,12 @@ void playlistwin_raise(void)
 
 static void playlistwin_release(GtkWidget * widget, GdkEventButton * event, gpointer callback_data)
 {
+	GdkEventButton skin_event = *event;
+
+	xmms_ui_to_skin_xy(playlistwin_scale(), event->x, event->y,
+			   &skin_event.x, &skin_event.y);
+	event = &skin_event;
+
 	if (event->button == 3)
 		return;
 
@@ -534,8 +543,7 @@ static void playlistwin_resize(int width, int height)
 	playlistwin_draw_frame();
 	draw_widget_list(playlistwin_wlist, &dummy, TRUE);
 	clear_widget_list_redraw(playlistwin_wlist);
-	gdk_window_set_back_pixmap(gtk_widget_get_window(playlistwin), playlistwin_bg, 0);
-	gdk_window_clear(gtk_widget_get_window(playlistwin));
+	gtk_widget_queue_draw(playlistwin);
 	gdk_pixmap_unref(oldbg);
 }
 
@@ -564,6 +572,11 @@ static void playlistwin_queue_resize(int width, int height)
 static void playlistwin_motion(GtkWidget * widget, GdkEventMotion * event, gpointer callback_data)
 {
 	XEvent ev;
+	GdkEventMotion skin_event = *event;
+
+	xmms_ui_to_skin_xy(playlistwin_scale(), event->x, event->y,
+			   &skin_event.x, &skin_event.y);
+	event = &skin_event;
 
 	if (playlistwin_resizing)
 	{
@@ -1119,6 +1132,11 @@ static void playlistwin_press(GtkWidget * widget, GdkEventButton * event, gpoint
 {
 	gboolean grab = TRUE;
 	int xpos, ypos;
+	GdkEventButton skin_event = *event;
+
+	xmms_ui_to_skin_xy(playlistwin_scale(), event->x, event->y,
+			   &skin_event.x, &skin_event.y);
+	event = &skin_event;
 
 	dock_get_widget_pos(playlistwin, &xpos, &ypos);
 	if (event->button == 1 && !cfg.show_wm_decorations &&
@@ -1391,8 +1409,7 @@ static gboolean playlistwin_configure(GtkWidget * window, GdkEventConfigure *eve
 
 void playlistwin_set_back_pixmap()
 {
-	gdk_window_set_back_pixmap(gtk_widget_get_window(playlistwin), playlistwin_bg, 0);
-	gdk_window_clear(gtk_widget_get_window(playlistwin));
+	gtk_widget_queue_draw(playlistwin);
 }
 
 static int playlistwin_client_event(GtkWidget *w, GdkEventClient *event, gpointer data)
@@ -1759,8 +1776,6 @@ static void playlistwin_draw_frame(void)
 void draw_playlist_window(gboolean force)
 {
 	gboolean redraw;
-	GList *wl;
-	Widget *w;
 
 	if (force)
 	{
@@ -1776,35 +1791,8 @@ void draw_playlist_window(gboolean force)
 	}
 	if (redraw || force)
 	{
-		if (force)
-			gdk_window_clear(gtk_widget_get_window(playlistwin));
-		else
-		{
-			wl = playlistwin_wlist;
-			while (wl)
-			{
-				w = (Widget *) wl->data;
-				if (w->redraw && w->visible)
-				{
-					/*
-					 * Some GTK3/Cairo text paths can draw fractional pixels just
-					 * outside the widget rectangle. Clear a 1px margin to avoid
-					 * stale pixels at list edges while scrolling.
-					 */
-					gint clear_x = MAX(w->x - 1, 0);
-					gint clear_y = MAX(w->y - 1, 0);
-					gint clear_w = MIN(w->width + 2, cfg.playlist_width - clear_x);
-					gint clear_h = MIN(w->height + 2, PLAYLIST_HEIGHT - clear_y);
-
-					gdk_window_clear_area(gtk_widget_get_window(playlistwin),
-							      clear_x, clear_y,
-							      clear_w, clear_h);
-					w->redraw = FALSE;
-				}
-				wl = wl->next;
-			}
-		}
-		gdk_flush();
+		/* Repaint the full backing surface, including fractional text edges. */
+		clear_widget_list_redraw(playlistwin_wlist);
 		gtk_widget_queue_draw(playlistwin);
 	}
 	unlock_widget_list(playlistwin_wlist);
@@ -2032,7 +2020,7 @@ static void playlistwin_create_gtk(void)
 	if (!cfg.show_wm_decorations)
 		gdk_window_set_decorations(gtk_widget_get_window(playlistwin), 0);
 
-	gdk_window_set_back_pixmap(gtk_widget_get_window(playlistwin), playlistwin_bg, 0);
+	gtk_widget_queue_draw(playlistwin);
 	playlistwin_create_mask();
 }
 

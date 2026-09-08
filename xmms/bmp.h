@@ -19,6 +19,9 @@
 #ifndef BMP_H
 #define BMP_H
 
-GdkPixmap *read_bmp(char *file);
+#include <cairo.h>
+
+/* Returns an owned opaque Cairo image surface, or NULL for an invalid BMP. */
+cairo_surface_t *read_bmp(char *file);
 
 #endif

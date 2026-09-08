@@ -307,6 +307,8 @@ SET_MAKE = @SET_MAKE@
 SHELL = @SHELL@
 SM_LIBS = @SM_LIBS@
 STRIP = @STRIP@
+TEST_X11_CFLAGS = @TEST_X11_CFLAGS@
+TEST_X11_LIBS = @TEST_X11_LIBS@
 USE_INCLUDED_LIBINTL = @USE_INCLUDED_LIBINTL@
 USE_IPV6 = @USE_IPV6@
 USE_NLS = @USE_NLS@
@@ -399,9 +401,9 @@ $(srcdir)/Makefile.in:  $(srcdir)/Makefile.am  $(am__configure_deps)
 	      exit 1;; \
 	  esac; \
 	done; \
-	echo ' cd $(top_srcdir) && $(AUTOMAKE) --gnu Visualization/sanalyzer/Makefile'; \
+	echo ' cd $(top_srcdir) && $(AUTOMAKE) --foreign Visualization/sanalyzer/Makefile'; \
 	$(am__cd) $(top_srcdir) && \
-	  $(AUTOMAKE) --gnu Visualization/sanalyzer/Makefile
+	  $(AUTOMAKE) --foreign Visualization/sanalyzer/Makefile
 Makefile: $(srcdir)/Makefile.in $(top_builddir)/config.status
 	@case '$?' in \
 	  *config.status*) \

@@ -1,3 +1,21 @@
+Tue Sep  8 2026  Olle Hallnas  <olle@olleha.com>
+
+	* Post-1.5.3 maintenance (unreleased):
+	  - Validate BMP headers, palettes, dimensions and compressed input before
+	    decoding skins with GdkPixbuf; reject truncated and oversized images.
+	  - Save configuration atomically with checked writes and private temporary
+	    files, preserving the previous file on failure.
+	  - Replace synchronous PulseAudio calls with a persistent threaded context,
+	    asynchronous system-volume control and real end-of-stream draining.
+	  - Preserve queued audio on pause and synchronize output/written timestamps
+	    after seek. Replace competing EOF heuristics with one monotonic watchdog.
+	  - Share skin/event scaling across windows and render scaled skins directly
+	    with Cairo. Split GTK compatibility helpers into focused headers.
+	  - Add regression tests, sanitizer checks and Ubuntu build/package CI.
+	  - Build Debian packages in an isolated tree, use root:root ownership and
+	    derive runtime dependencies from every executable and plugin.
+	  - Centralize the upstream version in VERSION and refresh build instructions.
+
 Mon Sep  7 12:35:00 CEST 2026  Olle Hallnas  <olle@olleha.com>
 
 	* GTK3 port maintenance release (1.5.3):

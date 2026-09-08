@@ -17,611 +17,358 @@
  *  along with this program; if not, write to the Free Software
  *  Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  */
-#include "xmms.h"
+#include "bmp.h"
 
-struct rgb_quad
+#include <errno.h>
+#include <fcntl.h>
+#include <gdk-pixbuf/gdk-pixbuf.h>
+#include <glib/gstdio.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+/* Skin artwork must not be able to exhaust memory before decoding starts. */
+#define BMP_MAX_FILE_SIZE (64 * 1024 * 1024)
+#define BMP_MAX_PIXELS (16 * 1024 * 1024)
+#define BMP_MAX_DIMENSION 16384
+
+static guint16 bmp_u16(const guchar *p)
 {
-	guchar rgbBlue;
-	guchar rgbGreen;
-	guchar rgbRed;
-	guchar rgbReserved;
-};
-
-struct bitfieldmask {
-	guint32 r, g, b;
-};
-
-#define BI_RGB        0L
-#define BI_RLE8       1L
-#define BI_RLE4       2L
-#define BI_BITFIELDS  3L
-
-static GdkGC *bmp_gc = NULL;
-
-static int read_le_short(FILE * file, guint16 * ret)
-{
-	guint16 tmp;
-
-	if (fread(&tmp, sizeof (guint16), 1, file) != 1)
-		return 0;
-
-	*ret = GINT16_FROM_LE(tmp);
-	return 1;
+	return (guint16)p[0] | ((guint16)p[1] << 8);
 }
 
-static int read_le_long(FILE * file, guint32 * ret)
+static guint32 bmp_u32(const guchar *p)
 {
-	guint32 tmp;
-
-	if (fread(&tmp, sizeof (guint32), 1, file) != 1)
-		return 0;
-
-	*ret = GUINT32_FROM_LE(tmp);
-	return 1;
+	return (guint32)p[0] | ((guint32)p[1] << 8) |
+	       ((guint32)p[2] << 16) | ((guint32)p[3] << 24);
 }
 
-static int find_first_set(guint32 v)
+static void bmp_put32(guchar *p, guint32 value)
 {
-	int i;
-	if (v == 0)
-		return -1;
-	for (i = 0; !(v & 1); i++)
-		v >>= 1;
-	return i;
+	p[0] = value;
+	p[1] = value >> 8;
+	p[2] = value >> 16;
+	p[3] = value >> 24;
 }
 
-static int find_last_set(guint32 v, int s)
+static gboolean bmp_mask_valid(guint32 mask, guint bits)
 {
-	int i;
-	v >>= s;
-	for (i = 0; (v & 1) && i + s < 32; i++)
-		v >>= 1;
-	return i;
+	if (!mask || (bits == 16 && (mask >> 16)))
+		return FALSE;
+	while (!(mask & 1))
+		mask >>= 1;
+	return (mask & (mask + 1)) == 0;
 }
 
-static void get_shift(guint32 v, int *r, int *l)
+/* Validate commands without writing pixels. Pixbuf's incremental BMP loader
+ * can successfully close an incomplete image, so close() alone is not enough.
+ * Skipped pixels and an early end-of-bitmap are legal (opaque black in skins).
+ */
+static gboolean bmp_rle_valid(const guchar *data, gsize size, guint width,
+			      guint height, guint bits, guint colors)
 {
-	int w;
-	*r = find_first_set(v);
-	*l = 0;
-	w = find_last_set(v, *r);
-	/* Limit to 8 bits */
-	if (w > 8)
-		*r += w - 8;
-	else
-		*l = 8 - w;
+	gsize pos = 0;
+	guint x = 0, y = 0;
+
+	while (size - pos >= 2)
+	{
+		guint count = data[pos++], code = data[pos++], i;
+		gsize bytes;
+
+		if (count)
+		{
+			if (y >= height || count > width - x)
+				return FALSE;
+			if (bits == 8 ? code >= colors :
+			    ((code >> 4) >= colors || (count > 1 && (code & 15) >= colors)))
+				return FALSE;
+			x += count;
+		}
+		else if (code == 1)
+			return TRUE;
+		else if (code == 0)
+		{
+			if (y >= height)
+				return FALSE;
+			x = 0;
+			y++;
+		}
+		else if (code == 2)
+		{
+			if (size - pos < 2 || y >= height ||
+			    data[pos] > width - x || data[pos + 1] >= height - y)
+				return FALSE;
+			x += data[pos++];
+			y += data[pos++];
+		}
+		else
+		{
+			bytes = bits == 8 ? code : (code + 1) / 2;
+			bytes = (bytes + 1) & ~(gsize)1;
+			if (y >= height || code > width - x || bytes > size - pos)
+				return FALSE;
+			for (i = 0; i < code; i++)
+			{
+				guint index = bits == 8 ? data[pos + i] :
+					(data[pos + i / 2] >> ((i & 1) ? 0 : 4)) & 15;
+				if (index >= colors)
+					return FALSE;
+			}
+			pos += bytes;
+			x += code;
+		}
+	}
+	return FALSE; /* Every compressed bitmap needs an end-of-bitmap command. */
 }
 
-static void read_1b_rgb(guint8 *input, gint input_size, guint8 *output, guint32 w, guint32 h, struct rgb_quad *palette);
-static void read_4b_rgb(guint8 *input, gint input_size, guint8 *output, guint32 w, guint32 h, struct rgb_quad *palette);
-static void read_4b_rle(guint8 *input, guint32 compr_size, guint8 *output, guint32 w, guint32 h, struct rgb_quad *palette);
-static void read_8b_rgb(guint8 *input, gint input_size, guint8 *output, guint32 w, guint32 h, struct rgb_quad *palette);
-static void read_8b_rle(guint8 *input, guint32 compr_size, guint8 *output, guint32 w, guint32 h, struct rgb_quad *palette);
-static void read_16b_rgb(guint8 *input, int input_size, guint8 *output,
-			 guint32 w, guint32 h, struct bitfieldmask *mask);
-static void read_24b_rgb(guint8 *input, gint input_size, guint8 *output, guint32 w, guint32 h);
-static void read_32b_rgb(guint8 *input, int input_size, guint8 *output,
-			 guint32 w, guint32 h, struct bitfieldmask *mask);
-
-
-GdkPixmap *read_bmp(gchar * filename)
+static GdkPixbuf *bmp_decode(const guchar *data, gsize length)
 {
-	FILE *file;
-	gchar type[2];
-	guint32 size, offset, headSize, w, h, comp, imgsize;
-	guint16 bitcount;
-	guint8 *data, *buffer;
-	struct stat statbuf;
+	guint32 header, offset, file_size, width, raw_height, height;
+	guint32 compression = 0, image_size = 0, colors = 0;
+	guint bits, planes, entry_size, i;
+	gsize palette, stride, payload, metadata_end, profile_start = 0;
+	gboolean top_down = FALSE, written, closed;
+	guchar normalized[14 + 56 + 256 * 4] = { 'B', 'M' };
+	guint normalized_header, normalized_size;
+	GdkPixbufLoader *loader;
+	GdkPixbuf *pixbuf = NULL;
 
-	struct rgb_quad rgb_quads[256];
-	struct bitfieldmask mask = {0};
-	GdkPixmap *ret = NULL;
-
-	if (stat(filename, &statbuf) == -1)
+	if (length < 26 || data[0] != 'B' || data[1] != 'M')
 		return NULL;
-	size = statbuf.st_size;
-
-	file = fopen(filename, "rb");
-	if (!file)
+	file_size = bmp_u32(data + 2);
+	offset = bmp_u32(data + 10);
+	header = bmp_u32(data + 14);
+	if (file_size)
+	{
+		if (file_size > length || file_size < 26)
+			return NULL;
+		length = file_size;
+	}
+	if (header != 12 && header != 40 && header != 52 &&
+	    header != 56 && header != 108 && header != 124)
+		return NULL;
+	if (14 + header > length || offset < 14 + header || offset > length)
+		return NULL;
+	palette = 14 + header;
+	entry_size = header == 12 ? 3 : 4;
+	if (header == 12)
+	{
+		width = bmp_u16(data + 18);
+		raw_height = bmp_u16(data + 20);
+		planes = bmp_u16(data + 22);
+		bits = bmp_u16(data + 24);
+	}
+	else
+	{
+		width = bmp_u32(data + 18);
+		raw_height = bmp_u32(data + 22);
+		top_down = (raw_height & 0x80000000u) != 0;
+		planes = bmp_u16(data + 26);
+		bits = bmp_u16(data + 28);
+		compression = bmp_u32(data + 30);
+		image_size = bmp_u32(data + 34);
+		colors = bmp_u32(data + 46);
+	}
+	height = top_down ? 0u - raw_height : raw_height;
+	if (planes != 1 || !width || !height || width > BMP_MAX_DIMENSION ||
+	    height > BMP_MAX_DIMENSION || (guint64)width * height > BMP_MAX_PIXELS)
+		return NULL;
+	if (bits != 1 && bits != 4 && bits != 8 && bits != 16 && bits != 24 && bits != 32)
+		return NULL;
+	if (compression > 3 || (compression == 1 && bits != 8) ||
+	    (compression == 2 && bits != 4) ||
+	    (compression == 3 && bits != 16 && bits != 32) ||
+	    (top_down && (compression == 1 || compression == 2)))
 		return NULL;
 
-	if (fread(type, 1, 2, file) != 2)
-		goto failure;
-	if (strncmp(type, "BM", 2))
+	/* Feed a compact header to Pixbuf: older BMP loaders do not consistently
+	 * honor gaps before bitfield pixels. V4/V5 color profiles are irrelevant
+	 * to the classic skin's opaque RGB surface; retain their channel masks.
+	 */
+	normalized_header = compression == 3 ? 56 : 40;
+	bmp_put32(normalized + 14, normalized_header);
+	bmp_put32(normalized + 18, width);
+	bmp_put32(normalized + 22, raw_height);
+	normalized[26] = 1;
+	normalized[28] = bits;
+	bmp_put32(normalized + 30, compression);
+	if (compression == 3)
 	{
-		g_warning("read_bmp(): Error in BMP file: wrong type");
-		goto failure;
-	}
-	fseek(file, 8, SEEK_CUR);
-	if (!read_le_long(file, &offset) ||
-	    !read_le_long(file, &headSize))
-		goto failure;
-	if (headSize == 12) /* BITMAPCOREINFO */
-	{
-		guint16 tmpw, tmph, dummy;
-		
-		if (!read_le_short(file, &tmpw) ||
-		    !read_le_short(file, &tmph) ||
-		    !read_le_short(file, &dummy) ||
-		    !read_le_short(file, &bitcount))
-			goto failure;
-		w = tmpw;
-		h = tmph;
-		imgsize = size - offset;
-		comp = BI_RGB;
-	}
-	else if (headSize == 40 || headSize == 108 || headSize == 124) /* BITMAPINFO/V4/V5 */
-	{
-		guint16 tmp;
-		guint32 extra;
-		
-		if (!read_le_long(file, &w) ||
-		    !read_le_long(file, &h) ||
-		    !read_le_short(file, &tmp) ||
-		    !read_le_short(file, &bitcount) ||
-		    !read_le_long(file, &comp) ||
-		    !read_le_long(file, &imgsize))
-			goto failure;
-		imgsize = size - offset;
-		extra = headSize - 24;
-		if ((bitcount == 16 || bitcount == 32) &&
-		    comp == BI_BITFIELDS && extra >= 12)
+		guint32 masks[4] = { 0 }, used = 0;
+		if (header == 40)
+			palette += 12;
+		if (palette > offset)
+			return NULL;
+		for (i = 0; i < 4; i++)
 		{
-			if (!read_le_long(file, &mask.r) ||
-			    !read_le_long(file, &mask.g) ||
-			    !read_le_long(file, &mask.b))
-				goto failure;
-			extra -= 12;
+			if (i < 3 || header >= 56)
+				masks[i] = bmp_u32(data + 54 + i * 4);
+			if ((i < 3 || masks[i]) &&
+			    (!bmp_mask_valid(masks[i], bits) || (used & masks[i])))
+				return NULL;
+			used |= masks[i];
+			bmp_put32(normalized + 54 + i * 4, masks[i]);
 		}
-		if (extra > 0)
-			fseek(file, extra, SEEK_CUR);
+	}
+	if (bits <= 8)
+	{
+		if (!colors)
+			colors = 1u << bits;
+		if (colors > (1u << bits) || colors * entry_size > offset - palette)
+			return NULL;
+		bmp_put32(normalized + 46, colors);
+		for (i = 0; i < colors; i++)
+			memcpy(normalized + 14 + normalized_header + i * 4,
+			       data + palette + i * entry_size, 3);
+		metadata_end = palette + colors * entry_size;
 	}
 	else
 	{
-		g_warning("read_bmp(): Error in BMP file: Invalid header size: %d (%s)",
-			  headSize, filename);
-		goto failure;
+		if (colors > 256 || colors * entry_size > offset - palette)
+			return NULL;
+		metadata_end = palette + colors * entry_size;
+		colors = 0;
 	}
-	if ((bitcount == 16 || bitcount == 32) && comp == BI_BITFIELDS)
+	payload = length - offset;
+	if (header == 124)
 	{
-		if (mask.r == 0 && mask.g == 0 && mask.b == 0 &&
-		    offset - headSize - 14 >= 12)
+		guint32 profile_offset = bmp_u32(data + 126);
+		guint32 profile_size = bmp_u32(data + 130);
+		if ((profile_offset == 0) != (profile_size == 0))
+			return NULL;
+		if (profile_size)
 		{
-			if (!read_le_long(file, &mask.r) ||
-			    !read_le_long(file, &mask.g) ||
-			    !read_le_long(file, &mask.b))
-				goto failure;
+			if (profile_offset > length - 14 ||
+			    profile_size > length - 14 - profile_offset)
+				return NULL;
+			profile_start = 14 + (gsize)profile_offset;
+			if (profile_start < metadata_end ||
+			    (profile_start < offset && profile_size > offset - profile_start))
+				return NULL;
+			if (profile_start >= offset)
+				payload = profile_start - offset;
 		}
 	}
-	else if (bitcount != 24 && bitcount != 16 && bitcount != 32)
+	if (image_size)
 	{
-		gint ncols, i;
-
-		ncols = offset - headSize - 14;
-		if (headSize == 12)
-		{
-			ncols = MIN(ncols / 3, 256);
-			for (i = 0; i < ncols; i++)
-				if (fread(&rgb_quads[i], 3, 1, file) != 1)
-					goto failure;
-		}
-		else
-		{
-			ncols = MIN(ncols / 4, 256);
-			if (fread(rgb_quads, 4, ncols, file) != ncols)
-				goto failure;
-		}
+		if (image_size > payload)
+			return NULL;
+		payload = image_size;
 	}
-	fseek(file, offset, SEEK_SET);
-	buffer = g_malloc(imgsize);
-	fread(buffer, imgsize, 1, file);
-	data = g_malloc0((w * 3 * h) + 3);	/* +3 is just for safety */
-
-	if (bitcount == 1)
-		read_1b_rgb(buffer, imgsize, data, w, h, rgb_quads);
-	else if (bitcount == 4)
+	if (compression == 1 || compression == 2)
 	{
-		if (comp == BI_RLE4)
-			read_4b_rle(buffer, imgsize, data, w, h, rgb_quads);
-		else if (comp == BI_RGB)
-			read_4b_rgb(buffer, imgsize, data, w, h, rgb_quads);
-		else
-			g_warning("read_bmp(): Invalid compression (%d)", comp);
+		if (!bmp_rle_valid(data + offset, payload, width, height, bits, colors))
+			return NULL;
 	}
-	else if (bitcount == 8)
-	{
-		if (comp == BI_RLE8)
-			read_8b_rle(buffer, imgsize, data, w, h, rgb_quads);
-		else if (comp == BI_RGB)
-			read_8b_rgb(buffer, imgsize, data, w, h, rgb_quads);
-		else
-			g_warning("read_bmp(): Invalid compression (%d)", comp);
-	}
-	else if (bitcount == 16)
-		read_16b_rgb(buffer, imgsize, data, w, h, &mask);
-	else if (bitcount == 24)
-		read_24b_rgb(buffer, imgsize, data, w, h);
-	else if (bitcount == 32)
-		read_32b_rgb(buffer, imgsize, data, w, h, &mask);
 	else
-		g_warning("read_bmp(): Unsupported bitdepth: %d", bitcount);
-
-	ret = gdk_pixmap_new(NULL, w, h, 24);
-
-	if (!bmp_gc)
-		bmp_gc = gdk_gc_new(ret);
-
-	gdk_draw_rgb_image(ret, bmp_gc, 0, 0, w, h, GDK_RGB_DITHER_MAX, data, w * 3);
-
-	g_free(data);
-	g_free(buffer);
-
- failure:
-	fclose(file);
-	return ret;
-}
-
-
-static void read_1b_rgb(guint8 *input, gint input_size, guint8 *output, guint32 w, guint32 h, struct rgb_quad *palette)
-{
-	guint8 *input_end = input + input_size;
-	guint8 *output_ptr = output + ((h - 1) * w * 3);
-	gint padding = (4 - ((w + 7) / 8) % 4) & 3;
-	gint x, y, i;
-	
-	for (y = 0; y < h; y++)
 	{
-		for (x = 0; x < w && input < input_end;)
+		stride = (((gsize)width * bits + 31) / 32) * 4;
+		if (stride * height > payload)
+			return NULL;
+		payload = stride * height;
+		if (bits <= 8 && colors < (1u << bits))
 		{
-			guint8 byte = *(input++);
-			for (i = 0; i < 8 && x < w; i++, x++)
-			{
-				*output_ptr++ = palette[(byte >> (7 - i)) & 1].rgbRed;
-				*output_ptr++ = palette[(byte >> (7 - i)) & 1].rgbGreen;
-				*output_ptr++ = palette[(byte >> (7 - i)) & 1].rgbBlue;
-			}
+			guint x, y;
+			for (y = 0; y < height; y++)
+				for (x = 0; x < width; x++)
+				{
+					guint bit = x * bits;
+					guint index = (data[offset + y * stride + bit / 8] >>
+						(8 - bits - bit % 8)) & ((1u << bits) - 1);
+					if (index >= colors)
+						return NULL;
+				}
 		}
-		input += padding;
-		output_ptr -= w * 6;        /* Back up two scanlines */
 	}
-}
-
-static void read_4b_rle(guint8 *input, guint32 compr_size, guint8 *output, guint32 w, guint32 h, struct rgb_quad *palette)
-{
-	gboolean at_end = 0;
-	gint j;
-	guint16 x = 0, y = 0;
-	guint8 *output_ptr = output + ((h - 1) * w * 3);
-	guint8 *input_ptr = input;
-	guint8 *input_end = input + compr_size;
-	guint8 *output_end = output + w * h * 3;
-	guint8 col, col1 = 0, col2 = 0, num, byte;
-
-
-	while (!at_end && input_ptr < input_end)
+	normalized_size = 14 + normalized_header + colors * 4;
+	bmp_put32(normalized + 2, normalized_size + payload);
+	bmp_put32(normalized + 10, normalized_size);
+	bmp_put32(normalized + 34, payload);
+	loader = gdk_pixbuf_loader_new_with_type("bmp", NULL);
+	if (!loader)
+		return NULL;
+	written = gdk_pixbuf_loader_write(loader, normalized, normalized_size, NULL) &&
+		  gdk_pixbuf_loader_write(loader, data + offset, payload, NULL);
+	closed = gdk_pixbuf_loader_close(loader, NULL);
+	if (written && closed)
 	{
-		byte = *(input_ptr++);
-		if (byte)
-		{
-			/* "Encoded mode" */
-			num = byte;
-			byte = *(input_ptr++);
-			col1 = byte & 0xF;
-			col2 = (byte >> 4);
-			for (j = 0; j < num; j++)
-			{
-				col = (j & 1) ? col1 : col2;
-
-				if (x >= w)
-					break;
-
-				*output_ptr++ = palette[col].rgbRed;
-				*output_ptr++ = palette[col].rgbGreen;
-				*output_ptr++ = palette[col].rgbBlue;
-				x++;
-				if (output_ptr > output_end)
-					output_ptr = output_end;
-			}
-		}
+		pixbuf = gdk_pixbuf_loader_get_pixbuf(loader);
+		if (pixbuf && gdk_pixbuf_get_width(pixbuf) == (gint)width &&
+		    gdk_pixbuf_get_height(pixbuf) == (gint)height)
+			g_object_ref(pixbuf);
 		else
-		{
-			byte = *(input_ptr++);
-			switch (byte)
-			{
-				case 0:
-					/* End of line */
-					x = 0;
-					y++;
-					output_ptr = output + ((h - y - 1) * w * 3) + (x * 3);
-					if (output_ptr > output_end)
-						output_ptr = output_end;
-					break;
-				case 1:
-					/* End of bitmap */
-					at_end = 1;
-					break;
-				case 2:
-					/* Delta */
-					x += *(input_ptr++);
-					y += *(input_ptr++);
-					output_ptr = output + ((h - y - 1) * w * 3) + (x * 3);
-					if (output_ptr > output_end)
-						output_ptr = output_end;
-					break;
-				default:
-					/*
-					 * "Absolute mode"
-					 *  non RLE encoded
-					 */
-					num = byte;
-					for (j = 0; j < num; j++)
-					{
-						if ((j & 1) == 0)
-						{
-							byte = *(input_ptr++);
-							col1 = byte & 0xF;
-							col2 = (byte >> 4);
-						}
-						col = (j & 1) ? col1 : col2;
-
-						if (x >= w)
-						{
-							input_ptr += (num - j) / 2;
-							break;
-						}
-
-						*output_ptr++ = palette[col].rgbRed;
-						*output_ptr++ = palette[col].rgbGreen;
-						*output_ptr++ = palette[col].rgbBlue;
-
-						x++;
-
-						if (output_ptr > output_end)
-							output_ptr = output_end;
-					}
-
-					/* Skip padding */
-					if ((num & 3) == 1 || (num & 3) == 2)
-						input_ptr++;
-					break;
-			}
-		}
+			pixbuf = NULL;
 	}
+	g_object_unref(loader);
+	return pixbuf;
 }
 
-static void read_4b_rgb(guint8 *input, gint input_size, guint8 *output, guint32 w, guint32 h, struct rgb_quad *palette)
+cairo_surface_t *read_bmp(gchar *filename)
 {
-	guint8 *input_end = input + input_size;
-	guint8 *output_ptr = output + ((h - 1) * w * 3);
-	gint padding = ((((w + 7) / 8) * 8) - w) / 2;
-	guint x, y;
-	
-	for (y = 0; y < h; y++)
+	struct stat stats;
+	int fd;
+	guchar *data;
+	gsize length, done = 0;
+	GdkPixbuf *pixbuf = NULL;
+	cairo_surface_t *surface = NULL;
+	gint width, height, x, y, channels, source_stride, target_stride;
+	guchar *source, *target;
+
+	if (!filename)
+		return NULL;
+	fd = g_open(filename, O_RDONLY | O_NONBLOCK, 0);
+	if (fd == -1)
+		return NULL;
+	if (fstat(fd, &stats) != 0 || !S_ISREG(stats.st_mode) ||
+	    stats.st_size < 26 || stats.st_size > BMP_MAX_FILE_SIZE)
 	{
-		for (x = 0; x < w && input < input_end; x+=2)
+		close(fd);
+		return NULL;
+	}
+	length = stats.st_size;
+	data = g_try_malloc(length);
+	if (data)
+	{
+		while (done < length)
 		{
-			guint8 byte = *(input++);
-
-			*output_ptr++ = palette[byte >> 4].rgbRed;
-			*output_ptr++ = palette[byte >> 4].rgbGreen;
-			*output_ptr++ = palette[byte >> 4].rgbBlue;
-
-			if (x + 1 == w)
+			ssize_t count = read(fd, data + done, length - done);
+			if (count < 0 && errno == EINTR)
+				continue;
+			if (count <= 0)
 				break;
-			
-			*output_ptr++ = palette[byte & 0xF].rgbRed;
-			*output_ptr++ = palette[byte & 0xF].rgbGreen;
-			*output_ptr++ = palette[byte & 0xF].rgbBlue;
+			done += count;
 		}
-		input += padding;
-		output_ptr -= w * 6;        /* Back up two scanlines */
 	}
-}
+	if (close(fd) == 0 && data && done == length)
+		pixbuf = bmp_decode(data, length);
+	g_free(data);
+	if (!pixbuf)
+		return NULL;
 
-
-static void read_8b_rle(guint8 *input, guint32 compr_size, guint8 *output, guint32 w, guint32 h, struct rgb_quad *palette)
-{
-	gboolean at_end = 0;
-	gint j;
-	guint16 x = 0, y = 0;
-	guint8 *output_ptr = output + ((h - 1) * w * 3);
-	guint8 *input_ptr = input;
-	guint8 *input_end = input + compr_size;
-	guint8 *output_end = output + w * h * 3;
-	guint8 num, byte;
-
-	while (!at_end && input_ptr < input_end)
+	width = gdk_pixbuf_get_width(pixbuf);
+	height = gdk_pixbuf_get_height(pixbuf);
+	surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+	if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS)
 	{
-		byte = *(input_ptr++);
-		if (byte)
-		{
-			/* "Encoded mode" */
-			num = byte;
-			byte = *(input_ptr++);
-			for (j = 0; j < num; j++)
-			{
-				if (x >= w)
-					break;
-				
-				*output_ptr++ = palette[byte].rgbRed;
-				*output_ptr++ = palette[byte].rgbGreen;
-				*output_ptr++ = palette[byte].rgbBlue;
-				x++;
-				if (output_ptr > output_end)
-					output_ptr = output_end;
-
-			}
-
-		}
-		else
-		{
-			byte = *(input_ptr++);
-			switch (byte)
-			{
-				/* End of line */
-				case 0:
-					x = 0;
-					y++;
-					output_ptr = output + ((h - y - 1) * w * 3) + (x * 3);
-					if (output_ptr > output_end)
-						output_ptr = output_end;
-					break;
-				case 1:
-					/* End of bitmap */
-					at_end = 1;
-					break;
-				case 2:
-					/* Delta */
-					x += *(input_ptr++);
-					y += *(input_ptr++);
-					output_ptr = output + ((h - y - 1) * w * 3) + (x * 3);
-					if (output_ptr > output_end)
-						output_ptr = output_end;
-					break;
-				default:
-					/*
-					 * "Absolute mode"
-					 *  non RLE encoded
-					 */
-					num = byte;
-					for (j = 0; j < num; j++)
-					{
-						byte = *(input_ptr++);
-						
-						if (x >= w)
-						{
-							input_ptr += num - j;
-							break;
-						}
-						
-						*output_ptr++ = palette[byte].rgbRed;
-						*output_ptr++ = palette[byte].rgbGreen;
-						*output_ptr++ = palette[byte].rgbBlue;
-						x++;
-						
-						if (output_ptr > output_end)
-							output_ptr = output_end;
-
-					}
-
-					/* Skip padding */
-					if (num & 1)
-						input_ptr++;
-					break;
-			}
-		}
+		cairo_surface_destroy(surface);
+		g_object_unref(pixbuf);
+		return NULL;
 	}
-}
-
-static void read_8b_rgb(guint8 *input, gint input_size, guint8 *output, guint32 w, guint32 h, struct rgb_quad *palette)
-{
-	guint8 *input_end = input + input_size;
-	guint8 *output_ptr = output + ((h - 1) * w * 3);
-	gint padding = (((w + 3) / 4) * 4) - w;
-	guint8 byte;
-	guint x, y;
-
-	for (y = 0; y < h; y++)
+	source = gdk_pixbuf_get_pixels(pixbuf);
+	source_stride = gdk_pixbuf_get_rowstride(pixbuf);
+	channels = gdk_pixbuf_get_n_channels(pixbuf);
+	cairo_surface_flush(surface);
+	target = cairo_image_surface_get_data(surface);
+	target_stride = cairo_image_surface_get_stride(surface);
+	/* Classic skin BMPs are opaque, even when their reserved/alpha byte is 0. */
+	for (y = 0; y < height; y++)
 	{
-		for (x = 0; x < w && input < input_end; x++)
-		{
-			byte = *(input++);
-			*output_ptr++ = palette[byte].rgbRed;
-			*output_ptr++ = palette[byte].rgbGreen;
-			*output_ptr++ = palette[byte].rgbBlue;
-		}
-		output_ptr -= w * 6;
-		input += padding;
+		const guchar *in = source + y * source_stride;
+		guint32 *out = (guint32 *)(target + y * target_stride);
+		for (x = 0; x < width; x++, in += channels)
+			out[x] = 0xff000000u | ((guint32)in[0] << 16) |
+				 ((guint32)in[1] << 8) | in[2];
 	}
-}
-
-
-static void read_16b_rgb(guint8 *input, int input_size, guint8 *output, guint32 w, guint32 h, struct bitfieldmask *mask)
-{
-	guint8 *input_end = input + input_size;
-	guint8 *output_ptr = output + ((h - 1) * w * 3);
-	int padding = (4 - ((w * 2) % 4)) & 3;
-	guint16 rgb16;
-	guint x, y;
-	int rsr, rsl, gsr, gsl, bsr, bsl;
-
-	if (mask->r == 0)
-		mask->r = 0x7C00;
-	if (mask->g == 0)
-		mask->g = 0x03E0;
-	if (mask->b == 0)
-		mask->b = 0x001F;
-	get_shift(mask->r, &rsr, &rsl);
-	get_shift(mask->g, &gsr, &gsl);
-	get_shift(mask->b, &bsr, &bsl);
-
-	for (y = 0; y < h; y++)
-	{
-		for (x = 0; x < w && input < (input_end - 1); x++)
-		{
-			rgb16 = ((*(input + 1)) << 8) | (*input);
-			input += 2;
-			*output_ptr++ = ((rgb16 & mask->r) >> rsr) << rsl;
-			*output_ptr++ = ((rgb16 & mask->g) >> gsr) << gsl;
-			*output_ptr++ = ((rgb16 & mask->b) >> bsr) << bsl;
-		}
-		output_ptr -= w * 6; /* Back up two scanlines */
-		input += padding;
-	}
-}
-
-static void read_24b_rgb(guint8 *input, gint input_size, guint8 *output, guint32 w, guint32 h)
-{
-	guint8 *input_end = input + input_size;
-	guint8 *output_ptr = output + ((h - 1) * w * 3);
-	gint padding = (4 - ((w * 3) % 4)) & 3;
-	guint8 r, g, b;
-	guint x, y;
-	
-	for (y = 0; y < h; y++)
-	{
-		for (x = 0; x < w && input < (input_end - 2); x++)
-		{
-			b = *(input++);
-			g = *(input++);
-			r = *(input++);
-			*output_ptr++ = r;
-			*output_ptr++ = g;
-			*output_ptr++ = b;
-		}
-		output_ptr -= w * 6;
-		input += padding;
-	}
-}
-
-static void read_32b_rgb(guint8 *input, int input_size, guint8 *output, guint32 w, guint32 h, struct bitfieldmask *mask)
-{
-	guint8 *input_end = input + input_size;
-	guint8 *output_ptr = output + ((h - 1) * w * 3);
-	guint x, y;
-	int rsr, rsl, gsr, gsl, bsr, bsl;
-
-	if (mask->r == 0)
-		mask->r = 0x00FF0000;
-	if (mask->g == 0)
-		mask->g = 0x0000FF00;
-	if (mask->b == 0)
-		mask->b = 0x000000FF;
-	get_shift(mask->r, &rsr, &rsl);
-	get_shift(mask->g, &gsr, &gsl);
-	get_shift(mask->b, &bsr, &bsl);
-
-	for (y = 0; y < h; y++)
-	{
-		for (x = 0; x < w && input < (input_end - 3); x++)
-		{
-			guint32 rgb = *(input + 3) << 24 | *(input + 2) << 16 |
-				*(input + 1) << 8 | *input;
-			input += 4;
-			*output_ptr++ = ((rgb & mask->r) >> rsr) << rsl;
-			*output_ptr++ = ((rgb & mask->g) >> gsr) << gsl;
-			*output_ptr++ = ((rgb & mask->b) >> bsr) << bsl;
-		}
-		output_ptr -= w * 6;
-	}
+	cairo_surface_mark_dirty(surface);
+	g_object_unref(pixbuf);
+	return surface;
 }

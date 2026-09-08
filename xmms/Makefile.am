@@ -43,7 +43,7 @@ playlist_slider.c playlist_slider.h \
 playlist_popup.c playlist_popup.h \
 eq_graph.c eq_graph.h \
 eq_slider.c eq_slider.h \
-main.c main.h \
+main.c main.h playback.h \
 skinwin.c skinwin.h \
 prefswin.c prefswin.h \
 playlistwin.c playlistwin.h \
@@ -58,6 +58,6 @@ urldecode.c urldecode.h \
 dnd.h \
 mkdtemp.c
 
-EXTRA_DIST= xmms_logo.xpm xmms_mini.xpm xmms.desktop xmms.wmconfig
+EXTRA_DIST= xmms_logo.xpm xmms_mini.xpm xmms.desktop xmms.wmconfig xmms.png ui_scale.h
 
 xmmsinclude_HEADERS = plugin.h fullscreen.h

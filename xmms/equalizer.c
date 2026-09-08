@@ -18,6 +18,7 @@
  *  Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  */
 #include "xmms.h"
+#include "ui_scale.h"
 #include "libxmms/configfile.h"
 
 GtkWidget *equalizerwin;
@@ -32,7 +33,7 @@ static GtkWidget *equalizerwin_configure_window = NULL;
 
 static GtkWidget *eqconfwin_options_eqdf_entry, *eqconfwin_options_eqef_entry;
 
-GdkPixmap *equalizerwin_bg, *equalizerwin_bg_dblsize;
+GdkPixmap *equalizerwin_bg;
 GdkGC *equalizerwin_gc;
 
 GList *equalizerwin_wlist = NULL;
@@ -51,17 +52,17 @@ static GtkItemFactory *equalizerwin_presets_menu;
 
 gboolean equalizerwin_focus = FALSE;
 
+static gint equalizerwin_scale(void)
+{
+	return xmms_ui_skin_scale(XMMS_UI_EQUALIZER, cfg.doublesize,
+				  cfg.eq_doublesize_linked);
+}
+
 static gboolean equalizerwin_draw_cb(GtkWidget *widget, cairo_t *cr, gpointer data)
 {
-	cairo_surface_t *bg = (cfg.doublesize && cfg.eq_doublesize_linked) ?
-		equalizerwin_bg_dblsize : equalizerwin_bg;
 	(void) widget;
 	(void) data;
-	if (!bg || !cr)
-		return FALSE;
-	cairo_set_source_surface(cr, bg, 0, 0);
-	cairo_paint(cr);
-	return TRUE;
+	return xmms_cairo_paint_skin(cr, equalizerwin_bg, equalizerwin_scale());
 }
 
 typedef struct
@@ -131,31 +132,22 @@ void equalizerwin_set_doublesize(gboolean ds)
 	gint height;
 	gint width;
 	gint target_h;
+	/* Callers already resolve the link preference into ds. */
+	gint scale = xmms_ui_skin_scale(XMMS_UI_EQUALIZER, ds, TRUE);
 	
 	if(cfg.equalizer_shaded)
 		height = 14;
 	else
 		height = 116;
-	width = ds ? 550 : 275;
-	target_h = height * (ds ? 2 : 1);
+	width = xmms_ui_to_logical(scale, 275);
+	target_h = xmms_ui_to_logical(scale, height);
 
 	equalizerwin_set_shape_mask();
 
-	if (ds)
-	{
-		dock_resize(dock_window_list, equalizerwin, 550, height * 2);
-		gdk_window_set_back_pixmap(gtk_widget_get_window(equalizerwin), equalizerwin_bg_dblsize, 0);
-	}
-	else
-	{
-		dock_resize(dock_window_list, equalizerwin, 275, height);
-		gdk_window_set_back_pixmap(gtk_widget_get_window(equalizerwin), equalizerwin_bg, 0);
-	}
+	dock_resize(dock_window_list, equalizerwin, width, target_h);
 
 	gtk_widget_set_size_request(equalizerwin, width, target_h);
 	gtk_window_resize(GTK_WINDOW(equalizerwin), width, target_h);
-	if (gtk_widget_get_window(equalizerwin))
-		gdk_window_clear(gtk_widget_get_window(equalizerwin));
 
 	draw_equalizer_window(TRUE);
 }
@@ -168,7 +160,8 @@ void equalizerwin_set_shade_menu_cb(gboolean shaded)
 	
 	if (shaded)
 	{
-		dock_shade(dock_window_list, equalizerwin, 14 * (EQUALIZER_DOUBLESIZE + 1));
+		dock_shade(dock_window_list, equalizerwin,
+			   xmms_ui_to_logical(equalizerwin_scale(), 14));
 		pbutton_set_button_data(equalizerwin_shade, -1, 3, -1, 47);
 		pbutton_set_skin_index1(equalizerwin_shade, SKIN_EQ_EX);
 		pbutton_set_button_data(equalizerwin_close, 11, 38, 11, 47);
@@ -178,7 +171,8 @@ void equalizerwin_set_shade_menu_cb(gboolean shaded)
 	}
 	else
 	{
-		dock_shade(dock_window_list, equalizerwin, 116 * (EQUALIZER_DOUBLESIZE + 1));
+		dock_shade(dock_window_list, equalizerwin,
+			   xmms_ui_to_logical(equalizerwin_scale(), 116));
 		pbutton_set_button_data(equalizerwin_shade, -1, 137, -1, 38);
 		pbutton_set_skin_index1(equalizerwin_shade, SKIN_EQMAIN);
 		pbutton_set_button_data(equalizerwin_close, 0, 116, 0, 125);
@@ -270,9 +264,6 @@ void equalizerwin_auto_pushed(gboolean toggled)
 
 void draw_equalizer_window(gboolean force)
 {
-	GdkImage *img, *img2;
-	GList *wl;
-	Widget *w;
 	gboolean redraw;
 
 	lock_widget_list(equalizerwin_wlist);
@@ -306,39 +297,7 @@ void draw_equalizer_window(gboolean force)
 
 	if (force || redraw)
 	{
-		if (cfg.doublesize && cfg.eq_doublesize_linked)
-		{
-			if (force)
-			{
-				img = gdk_image_get(equalizerwin_bg, 0, 0, 275, 116);
-				img2 = create_dblsize_image(img);
-				gdk_draw_image(equalizerwin_bg_dblsize, equalizerwin_gc, img2, 0, 0, 0, 0, 550, 232);
-				gdk_image_destroy(img2);
-				gdk_image_destroy(img);
-			}
-			else
-			{
-				wl = equalizerwin_wlist;
-				while (wl)
-				{
-					w = (Widget *) wl->data;
-					if (w->redraw && w->visible)
-					{
-						img = gdk_image_get(equalizerwin_bg, w->x, w->y, w->width, w->height);
-						img2 = create_dblsize_image(img);
-						gdk_draw_image(equalizerwin_bg_dblsize, equalizerwin_gc, img2, 0, 0, w->x << 1, w->y << 1, w->width << 1, w->height << 1);
-						gdk_image_destroy(img2);
-						gdk_image_destroy(img);
-						w->redraw = FALSE;
-					}
-					wl = wl->next;
-				}
-			}
-		}
-		else
-			clear_widget_list_redraw(equalizerwin_wlist);
-		gdk_window_clear(gtk_widget_get_window(equalizerwin));
-		gdk_flush();
+		clear_widget_list_redraw(equalizerwin_wlist);
 		gtk_widget_queue_draw(equalizerwin);
 	}
 	unlock_widget_list(equalizerwin_wlist);
@@ -366,43 +325,14 @@ static gboolean inside_sensitive_widgets(gint x, gint y)
 		inside_widget(x, y, equalizerwin_balance));
 }
 
-static void equalizerwin_map_event_xy(gdouble *x, gdouble *y, gdouble x_root, gdouble y_root)
-{
-	GdkWindow *window;
-	gint root_x = 0, root_y = 0;
-
-	if (!equalizerwin || !x || !y)
-		return;
-
-	window = gtk_widget_get_window(equalizerwin);
-	if (!window)
-		return;
-
-	gdk_window_get_root_origin(window, &root_x, &root_y);
-
-	/*
-	 * Use root-space coordinates and map them to window-local coordinates.
-	 * This avoids backend-specific differences in event->x/event->y scaling.
-	 */
-	*x = x_root - root_x;
-	*y = y_root - root_y;
-
-	if (cfg.doublesize && cfg.eq_doublesize_linked)
-	{
-		*x /= 2.0;
-		*y /= 2.0;
-	}
-}
-
 void equalizerwin_press(GtkWidget * widget, GdkEventButton * event, gpointer callback_data)
 {
-	gint mx, my;
 	gboolean grab = TRUE;
+	GdkEventButton skin_event = *event;
 
-	equalizerwin_map_event_xy(&event->x, &event->y, event->x_root, event->y_root);
-
-	mx = event->x;
-	my = event->y;
+	xmms_ui_to_skin_xy(equalizerwin_scale(), event->x, event->y,
+			   &skin_event.x, &skin_event.y);
+	event = &skin_event;
 
 	if (event->button == 1 && event->type == GDK_BUTTON_PRESS &&
 	    ((cfg.easy_move || cfg.equalizer_shaded || event->y < 14) &&
@@ -451,8 +381,11 @@ void equalizerwin_press(GtkWidget * widget, GdkEventButton * event, gpointer cal
 void equalizerwin_motion(GtkWidget * widget, GdkEventMotion * event, gpointer callback_data)
 {
 	XEvent ev;
+	GdkEventMotion skin_event = *event;
 
-	equalizerwin_map_event_xy(&event->x, &event->y, event->x_root, event->y_root);
+	xmms_ui_to_skin_xy(equalizerwin_scale(), event->x, event->y,
+			   &skin_event.x, &skin_event.y);
+	event = &skin_event;
 	if (dock_is_moving(equalizerwin))
 	{
 		dock_move_motion(equalizerwin, event);
@@ -460,6 +393,7 @@ void equalizerwin_motion(GtkWidget * widget, GdkEventMotion * event, gpointer ca
 	else
 	{
 		handle_motion_cb(equalizerwin_wlist, widget, event);
+		draw_equalizer_window(FALSE);
 		draw_main_window(FALSE);
 	}
 	gdk_flush();
@@ -474,7 +408,11 @@ void equalizerwin_motion(GtkWidget * widget, GdkEventMotion * event, gpointer ca
 
 void equalizerwin_release(GtkWidget * widget, GdkEventButton * event, gpointer callback_data)
 {
-	equalizerwin_map_event_xy(&event->x, &event->y, event->x_root, event->y_root);
+	GdkEventButton skin_event = *event;
+
+	xmms_ui_to_skin_xy(equalizerwin_scale(), event->x, event->y,
+			   &skin_event.x, &skin_event.y);
+	event = &skin_event;
 
 	gdk_pointer_ungrab(GDK_CURRENT_TIME);
 	gdk_flush();
@@ -627,11 +565,7 @@ static gboolean equalizerwin_configure(GtkWidget * window, GdkEventConfigure *ev
 
 void equalizerwin_set_back_pixmap(void)
 {
-	if (cfg.doublesize && cfg.eq_doublesize_linked)
-		gdk_window_set_back_pixmap(gtk_widget_get_window(equalizerwin), equalizerwin_bg_dblsize, 0);
-	else
-		gdk_window_set_back_pixmap(gtk_widget_get_window(equalizerwin), equalizerwin_bg, 0);
-	gdk_window_clear(gtk_widget_get_window(equalizerwin));
+	gtk_widget_queue_draw(equalizerwin);
 }
 
 gint equalizerwin_client_event(GtkWidget *w, GdkEventClient *event, gpointer data)
@@ -828,10 +762,9 @@ static void equalizerwin_create_gtk(void)
 	gtk_window_set_transient_for(GTK_WINDOW(equalizerwin), GTK_WINDOW(mainwin));
 	if (cfg.equalizer_x != -1 && cfg.save_window_position)
 		dock_set_uposition(equalizerwin, cfg.equalizer_x, cfg.equalizer_y);
-	if (cfg.doublesize && cfg.eq_doublesize_linked)
-		gtk_widget_set_size_request(equalizerwin, 550, (cfg.equalizer_shaded ? 28 : 232));
-	else
-		gtk_widget_set_size_request(equalizerwin, 275, (cfg.equalizer_shaded ? 14 : 116));
+	gtk_widget_set_size_request(equalizerwin,
+		xmms_ui_to_logical(equalizerwin_scale(), 275),
+		xmms_ui_to_logical(equalizerwin_scale(), cfg.equalizer_shaded ? 14 : 116));
 
 	gtk_widget_set_events(equalizerwin, GDK_FOCUS_CHANGE_MASK | GDK_BUTTON_MOTION_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK);
 	gtk_widget_add_events(equalizerwin, GDK_FOCUS_CHANGE_MASK | GDK_BUTTON_MOTION_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK);
@@ -844,10 +777,6 @@ static void equalizerwin_create_gtk(void)
 	gtk_window_add_accel_group(GTK_WINDOW(equalizerwin), equalizerwin_accel);
 
 	equalizerwin_set_back_pixmap();
-	if (cfg.doublesize && cfg.eq_doublesize_linked)
-		gdk_window_set_back_pixmap(gtk_widget_get_window(equalizerwin), equalizerwin_bg_dblsize, 0);
-	else
-		gdk_window_set_back_pixmap(gtk_widget_get_window(equalizerwin), equalizerwin_bg, 0);
 
 	gtk_signal_connect(GTK_OBJECT(equalizerwin), "delete_event",
 			   GTK_SIGNAL_FUNC(equalizerwin_delete), NULL);
@@ -881,7 +810,6 @@ void equalizerwin_create(void)
 	equalizer_auto_presets = equalizerwin_read_presets("eq.auto_preset");
 
 	equalizerwin_bg = gdk_pixmap_new(NULL, 275, 116, 24);
-	equalizerwin_bg_dblsize = gdk_pixmap_new(NULL, 550, 232, 24);
 	equalizerwin_create_gtk();
 	equalizerwin_gc = gdk_gc_new(gtk_widget_get_window(equalizerwin));
 	equalizerwin_create_widgets();
@@ -913,10 +841,9 @@ void equalizerwin_real_show(void)
 	gtk_widget_show(equalizerwin);
 	if (pposition_broken && cfg.equalizer_x != -1 && cfg.save_window_position)
 		dock_set_uposition(equalizerwin, cfg.equalizer_x, cfg.equalizer_y);
-	if (cfg.doublesize && cfg.eq_doublesize_linked)
-		gtk_widget_set_size_request(equalizerwin, 550, (cfg.equalizer_shaded ? 28 : 232));
-	else
-		gtk_widget_set_size_request(equalizerwin, 275, (cfg.equalizer_shaded ? 14 : 116));
+	gtk_widget_set_size_request(equalizerwin,
+		xmms_ui_to_logical(equalizerwin_scale(), 275),
+		xmms_ui_to_logical(equalizerwin_scale(), cfg.equalizer_shaded ? 14 : 116));
 	gdk_flush();
 	draw_equalizer_window(TRUE);
 	cfg.equalizer_visible = TRUE;

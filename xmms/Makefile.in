@@ -388,6 +388,8 @@ SET_MAKE = @SET_MAKE@
 SHELL = @SHELL@
 SM_LIBS = @SM_LIBS@
 STRIP = @STRIP@
+TEST_X11_CFLAGS = @TEST_X11_CFLAGS@
+TEST_X11_LIBS = @TEST_X11_LIBS@
 USE_INCLUDED_LIBINTL = @USE_INCLUDED_LIBINTL@
 USE_IPV6 = @USE_IPV6@
 USE_NLS = @USE_NLS@
@@ -501,7 +503,7 @@ playlist_slider.c playlist_slider.h \
 playlist_popup.c playlist_popup.h \
 eq_graph.c eq_graph.h \
 eq_slider.c eq_slider.h \
-main.c main.h \
+main.c main.h playback.h \
 skinwin.c skinwin.h \
 prefswin.c prefswin.h \
 playlistwin.c playlistwin.h \
@@ -516,7 +518,7 @@ urldecode.c urldecode.h \
 dnd.h \
 mkdtemp.c
 
-EXTRA_DIST = xmms_logo.xpm xmms_mini.xpm xmms.desktop xmms.wmconfig
+EXTRA_DIST = xmms_logo.xpm xmms_mini.xpm xmms.desktop xmms.wmconfig xmms.png ui_scale.h
 xmmsinclude_HEADERS = plugin.h fullscreen.h
 all: i18n.h
 	$(MAKE) $(AM_MAKEFLAGS) all-recursive
@@ -532,9 +534,9 @@ $(srcdir)/Makefile.in:  $(srcdir)/Makefile.am  $(am__configure_deps)
 	      exit 1;; \
 	  esac; \
 	done; \
-	echo ' cd $(top_srcdir) && $(AUTOMAKE) --gnu xmms/Makefile'; \
+	echo ' cd $(top_srcdir) && $(AUTOMAKE) --foreign xmms/Makefile'; \
 	$(am__cd) $(top_srcdir) && \
-	  $(AUTOMAKE) --gnu xmms/Makefile
+	  $(AUTOMAKE) --foreign xmms/Makefile
 Makefile: $(srcdir)/Makefile.in $(top_builddir)/config.status
 	@case '$?' in \
 	  *config.status*) \

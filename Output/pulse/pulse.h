@@ -4,7 +4,7 @@
 #include "config.h"
 #include "gtk_compat.h"
 
-#include <pulse/simple.h>
+#include <pulse/pulseaudio.h>
 #include <pulse/error.h>
 
 #include <xmms/plugin.h>
@@ -28,6 +28,8 @@ void pulse_init(void);
 void pulse_about(void);
 void pulse_configure(void);
 void pulse_save_config(void);
+void pulse_start(void);
+void pulse_shutdown(void);
 
 void pulse_get_volume(int *l, int *r);
 void pulse_set_volume(int l, int r);
